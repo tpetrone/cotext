@@ -34,7 +34,28 @@ describe('locate', () => {
   })
 
   test('reports duplicate text as ambiguous', () => {
-    expect(locate(SPEC, 'A API será REST.')).toEqual({ kind: 'ambiguous', count: 2 })
+    const found = locate(SPEC, 'A API será REST.')
+    if (found.kind !== 'ambiguous') throw new Error(found.kind)
+    expect(found.count).toBe(2)
+    expect(found.anchors.map(one => one.lineStart)).toEqual([6, 7])
+  })
+
+  test('tells duplicates apart by the line number a selection takes from the gutter', () => {
+    const found = locate(SPEC, '7 A API será REST.')
+    if (found.kind !== 'found') throw new Error(found.kind)
+    expect(found.anchor.lineStart).toBe(7)
+    // A block's number: the first match on or after the line it starts.
+    const block = locate(SPEC, '6 A API será REST.')
+    if (block.kind !== 'found') throw new Error(block.kind)
+    expect(block.anchor.lineStart).toBe(6)
+  })
+
+  test('tells code duplicates apart by gutter numbers on each row', () => {
+    const code = ['let a = 1', 'return a', 'let a = 1', 'return a'].join('\n')
+    expect(locate(code, 'let a = 1\nreturn a', { syntax: 'code' }).kind).toBe('ambiguous')
+    const found = locate(code, '3 │ let a = 1\n4 │ return a', { syntax: 'code' })
+    if (found.kind !== 'found') throw new Error(found.kind)
+    expect(found.anchor.lineStart).toBe(3)
   })
 
   test('tells duplicates apart by stored context', () => {

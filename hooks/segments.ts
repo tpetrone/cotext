@@ -97,3 +97,19 @@ function lineAt(source: string, offset: number): number {
 
   return line
 }
+
+/**
+ * What the keyboard cursor steps over: a Markdown block, or a code line.
+ * Blank lines are skipped; `end` is exclusive, as a segment's.
+ */
+export function units(source: string, syntax: Syntax): Segment[] {
+  if (syntax === 'markdown') return segment(source)
+  const found: Segment[] = []
+  let start = 0
+  source.split('\n').forEach((text, i) => {
+    if (text.trim() !== '') found.push({ start, end: start + text.length, line: i + 1, text })
+    start += text.length + 1
+  })
+
+  return found
+}

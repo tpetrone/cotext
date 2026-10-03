@@ -16,6 +16,11 @@ const MEANING: Record<AnnotationType, string> = {
   comment: 'The user left a comment on this.',
 }
 
+const DETACHED = {
+  file: 'This file no longer exists and no rename was found: the annotation may be moot.',
+  text: 'This passage is no longer in the file: it may have been addressed already.',
+} as const
+
 const MODE: Record<SendMode, string> = {
   review:
     'Mode: REVIEW. Answer each annotation. Do not edit files: file edits are blocked for this turn.',
@@ -43,10 +48,11 @@ export function buildReviewPrompt(annotations: readonly Annotation[], mode: Send
       lines.push(`## ${file}`, '')
     }
     lines.push(
-      `ANNOTATION ${i + 1}: ${one.type} (${where(one)})`,
+      `ANNOTATION ${i + 1}: ${one.type} (${where(one)}) · id ${one.id}`,
       quote(one.anchor.selectedText),
       `Meaning: ${MEANING[one.type]}`,
     )
+    if (one.detached) lines.push(DETACHED[one.detached])
     if (one.comment) lines.push(`Note: ${one.comment}`)
     if (one.status === 'needs_human' && one.resolution) {
       lines.push(`Earlier you handed this back: ${one.resolution.summary}`)
@@ -62,6 +68,8 @@ export function buildReviewPrompt(annotations: readonly Annotation[], mode: Send
     `When you are done, call \`${RESOLVE_TOOL}\` once with an entry for every annotation: ` +
       '`{ n, status: "resolved" | "needs_human", summary }`, where `summary` is one line ' +
       'on what you did, or on what the user has to decide.',
+    `Once the user decides something you handed back, even after this turn, call \`${RESOLVE_TOOL}\` ` +
+      'again with `{ id, status, summary }`.',
   )
 
   return lines.join('\n')

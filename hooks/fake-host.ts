@@ -1,5 +1,5 @@
 // What a session would answer beneath the plugin, for the engine tests: a
-// filesystem in memory, a selection, the prompt queue and an Edit tool.
+// filesystem in memory, a selection, the prompt queue, an Edit tool and git.
 
 import type { On } from 'claude-code'
 
@@ -33,6 +33,8 @@ export type Host = {
   select: (text: string | undefined) => void
   toasts: string[]
   submitted: string[]
+  /** The renames `git diff HEAD` reports, `[from, to]`; set by a test. */
+  renames: [string, string][]
   /** The annotations review.json holds now. */
   saved: () => ReviewFile['annotations']
 }
@@ -48,6 +50,7 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
     },
     toasts: [],
     submitted: [],
+    renames: [],
     saved: () => {
       const text = host.files.get('.review/review.json')
 
@@ -71,10 +74,16 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
   on('fs.stat', (_, e) => ({
     value: { kind: 'file', size: 0, mtimeMs: 0, isLink: false, realPath: `/work/${relative(e.path)}` },
   }))
+  on('process.run', (_, e) => {
+    const isDiff = e.argv[1] === 'diff'
+    const stdout = isDiff ? host.renames.map(([from, to]) => `R100\0${from}\0${to}\0`).join('') : ''
+
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('ui.selection', () => ({ value: selected === undefined ? undefined : { text: selected } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.focus', () => ({}))
-  on('ui.scroll', () => ({}))
+  on('ui.scroll', () => ({ value: {} }))
   on('ui.toast', (_, e) => {
     host.toasts.push(e.text)
 

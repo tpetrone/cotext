@@ -1,4 +1,4 @@
-import type { Anchor } from '../types'
+import type { Anchor, Guess } from '../types'
 
 const CONTEXT = 40
 
@@ -50,32 +50,44 @@ export function project(source: string, syntax: Syntax = 'markdown'): Projection
 export type Located =
   | { kind: 'found'; anchor: Anchor }
   | { kind: 'missing' }
-  | { kind: 'ambiguous'; count: number }
+  | { kind: 'ambiguous'; count: number; anchors: Anchor[] }
 
 export type Hint = { contextBefore?: string; contextAfter?: string }
 
 export type LocateOptions = { hint?: Hint; syntax?: Syntax }
 
-// A selection across a code view can take the line-number gutter with it.
+// A selection across the pane can take the line-number gutter with it.
 const GUTTER = /^[ \t]*\d+[ \t]*[│|]?[ \t]?/gm
+const FIRST_NUMBER = /^[ \t]*(\d+)/
 
 /**
  * Finds `selected` in `source`, ignoring whitespace and, for Markdown, its
  * syntax. Several matches are told apart by `hint` (an anchor's stored
  * context) when given; otherwise, or when the context ties, the answer is
- * `ambiguous`. In code, a selection that is not found is tried again without
- * the gutter's line numbers.
+ * `ambiguous`. A selection that is not found is tried again without the
+ * gutter's line numbers, and the number on its first row, when it has one,
+ * tells duplicates apart: the first match on or after that line wins (a
+ * code view numbers each line, a Markdown view each block's first).
  */
 export function locate(source: string, selected: string, options: LocateOptions = {}): Located {
   const found = locateText(source, selected, options)
-  if (found.kind !== 'missing' || options.syntax !== 'code') return found
+  if (found.kind !== 'missing') return found
 
   const unguttered = selected.replace(GUTTER, '')
+  if (unguttered === selected) return found
+  const firstRow = selected.split('\n', 1)[0]!
+  const numbered = firstRow.replace(GUTTER, '') !== firstRow
+  const line = numbered ? Number(FIRST_NUMBER.exec(firstRow)![1]) : undefined
 
-  return unguttered === selected ? found : locateText(source, unguttered, options)
+  return locateText(source, unguttered, options, line)
 }
 
-function locateText(source: string, selected: string, { hint, syntax }: LocateOptions): Located {
+function locateText(
+  source: string,
+  selected: string,
+  { hint, syntax }: LocateOptions,
+  line?: number,
+): Located {
   const needle = project(selected, syntax).text.trim()
   if (needle.length === 0) return { kind: 'missing' }
 
@@ -88,14 +100,24 @@ function locateText(source: string, selected: string, { hint, syntax }: LocateOp
 
   const spans = starts.map(at => ({ start: map[at]!, end: map[at + needle.length - 1]! + 1 }))
   if (spans.length === 1) return { kind: 'found', anchor: anchorAt(source, spans[0]!) }
-  if (hint === undefined) return { kind: 'ambiguous', count: spans.length }
+  if (line !== undefined) {
+    const after = spans.filter(span => lineOf(source, span.start) >= line)
+    const nearest = Math.min(...after.map(span => lineOf(source, span.start)))
+    const onIt = after.filter(span => lineOf(source, span.start) === nearest)
+    if (onIt.length === 1) return { kind: 'found', anchor: anchorAt(source, onIt[0]!) }
+  }
+  if (hint === undefined) return ambiguous(source, spans)
 
   const scored = spans.map(span => ({ span, score: contextScore(source, span, hint) }))
   const best = Math.max(...scored.map(one => one.score))
   const winners = scored.filter(one => one.score === best)
-  if (winners.length !== 1) return { kind: 'ambiguous', count: winners.length }
+  if (winners.length !== 1) return ambiguous(source, winners.map(one => one.span))
 
   return { kind: 'found', anchor: anchorAt(source, winners[0]!.span) }
+}
+
+function ambiguous(source: string, spans: { start: number; end: number }[]): Located {
+  return { kind: 'ambiguous', count: spans.length, anchors: spans.map(span => anchorAt(source, span)) }
 }
 
 /** Whether the anchor's offsets still hold its text in `source`. */
@@ -125,6 +147,49 @@ export function relocate(source: string, anchor: Anchor, syntax: Syntax = 'markd
   return anchor.symbol === undefined ? again.anchor : { ...again.anchor, symbol: anchor.symbol }
 }
 
+/**
+ * Where a rewritten passage most likely went: between the stored context on
+ * both sides when both are still in `source`, else the line sharing the most
+ * words with the old text. Approximate by nature; null when nothing fits.
+ */
+export function guessNear(source: string, anchor: Anchor): Guess | null {
+  const before = anchor.contextBefore.trimEnd().slice(-20)
+  const after = anchor.contextAfter.trimStart().slice(0, 20)
+  const from = before === '' ? -1 : source.indexOf(before)
+  const to = after === '' ? -1 : source.indexOf(after, from === -1 ? 0 : from + before.length)
+  let start = -1
+  let end = -1
+  if (from !== -1 && to !== -1) {
+    start = from + before.length
+    end = to
+  } else {
+    const words = new Set(anchor.selectedText.toLowerCase().split(/\W+/).filter(word => word.length > 2))
+    let best = 0
+    let offset = 0
+    for (const line of source.split('\n')) {
+      const shared = new Set(line.toLowerCase().split(/\W+/).filter(word => words.has(word))).size
+      if (shared > best) {
+        best = shared
+        start = offset
+        end = offset + line.length
+      }
+      offset += line.length + 1
+    }
+    if (best === 0 || best * 2 < words.size) return null
+  }
+  while (start < end && /\s/.test(source[start]!)) start++
+  while (end > start && /\s/.test(source[end - 1]!)) end--
+  if (end <= start || end - start > anchor.selectedText.length * 4 + 200) return null
+
+  return {
+    text: source.slice(start, end),
+    start,
+    end,
+    lineStart: lineOf(source, start),
+    lineEnd: lineOf(source, end - 1),
+  }
+}
+
 export function lineOf(source: string, offset: number): number {
   let line = 1
   for (let i = 0; i < offset && i < source.length; i++) {
@@ -134,7 +199,7 @@ export function lineOf(source: string, offset: number): number {
   return line
 }
 
-function anchorAt(source: string, span: { start: number; end: number }): Anchor {
+export function anchorAt(source: string, span: { start: number; end: number }): Anchor {
   return {
     selectedText: source.slice(span.start, span.end),
     start: span.start,

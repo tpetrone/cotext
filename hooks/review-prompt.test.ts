@@ -33,7 +33,7 @@ test('numbers annotations, quotes their text and keeps the guidelines', () => {
     'review',
   )
   expect(prompt.startsWith('COTEXT REVIEW: the user reviewed `architecture.md` and left 3 annotations.')).toBe(true)
-  expect(prompt).toContain('ANNOTATION 1: investigate (L23)\n> SQLite será utilizado como storage principal')
+  expect(prompt).toContain('ANNOTATION 1: investigate (L23) · id SQLite será utilizado como storage principal\n> SQLite será utilizado como storage principal')
   expect(prompt).toContain('Note: Investigue alternativas.')
   expect(prompt).toContain('ANNOTATION 2: reject (L48)')
   expect(prompt).toContain('Meaning: The user disagrees with this. Reconsider it.')
@@ -59,5 +59,5 @@ test('numbers annotations file by file, in the order a send records', () => {
   const b = { ...one('highlight', 'two', 2), file: 'a.md' }
   const c = { ...one('highlight', 'three', 3), file: 'b.md' }
   expect(promptOrder([a, b, c]).map(x => x.anchor.selectedText)).toEqual(['one', 'three', 'two'])
-  expect(buildReviewPrompt([a, b, c], 'review')).toMatch(/ANNOTATION 2: highlight \(L3\)\n> three/)
+  expect(buildReviewPrompt([a, b, c], 'review')).toMatch(/ANNOTATION 2: highlight \(L3\) · id three\n> three/)
 })
