@@ -1,0 +1,737 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cotext</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #fbfaf8; --fg: #1f1e1c; --muted: #6f6b66; --line: #e4e0da; --card: #ffffff;
+    --accent: #2f6fd6; --ask: #f5d76e; --comment: #9cc3ff;
+    --del: #c9372c; --ins: #1f7a4d; --ins-bg: #dff3e7; --hl: #fff2b3; --hl-active: #ffe27a;
+    --shadow: 0 6px 24px rgba(0, 0, 0, .12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #1b1b1d; --fg: #e9e7e3; --muted: #9a958e; --line: #34332f; --card: #252527;
+      --accent: #6aa0ff; --ask: #8a7420; --comment: #2c5590;
+      --del: #ff7b72; --ins: #56d08f; --ins-bg: #173b28; --hl: #4a4220; --hl-active: #6b5c1c;
+      --shadow: 0 6px 24px rgba(0, 0, 0, .5);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .layout { display: grid; grid-template-columns: minmax(0, 760px) 340px; gap: 32px; justify-content: center; padding: 72px 16px 160px; }
+  main { min-width: 0; }
+  header.file { color: var(--muted); font-size: 13px; margin-bottom: 24px; word-break: break-all; }
+  .warn { color: var(--del); }
+
+  section.seg { position: relative; padding-left: 44px; }
+  section.seg > .ln {
+    position: absolute; left: 0; width: 36px; text-align: right; color: var(--muted);
+    font: 12px/1.6 ui-monospace, Menlo, monospace; user-select: none; padding-top: .2em;
+  }
+  section.seg .body > :first-child { margin-top: 0; }
+  section.seg .body > :last-child { margin-bottom: 0; }
+  section.seg + section.seg { margin-top: 1em; }
+  section.code + section.code { margin-top: 0; }
+  pre, code { font-family: ui-monospace, Menlo, monospace; font-size: 13.5px; }
+  pre { overflow-x: auto; margin: 0; }
+  .body pre { background: color-mix(in srgb, var(--fg) 5%, transparent); padding: 10px 12px; border-radius: 6px; }
+  section.code .body pre { background: none; padding: 0; border-radius: 0; line-height: 1.5; }
+  section.code > .ln { line-height: 1.5; white-space: pre; font-size: 13.5px; padding-top: 0; }
+  table { border-collapse: collapse; } td, th { border: 1px solid var(--line); padding: 4px 8px; }
+  img { max-width: 100%; }
+
+  /* Tracked changes: what goes is struck through, what comes is coloured. */
+  mark { color: inherit; background: none; border-radius: 2px; }
+  mark.hl { background: var(--hl); cursor: pointer; }
+  mark.hl.active { background: var(--hl-active); }
+  mark.del { color: var(--del); text-decoration: line-through; text-decoration-thickness: 2px; cursor: pointer; }
+  mark.ins { color: var(--ins); background: var(--ins-bg); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--ins) 50%, transparent); cursor: pointer; }
+  mark.hl.ins { background: color-mix(in srgb, var(--ins-bg) 60%, var(--hl)); }
+  mark.fresh { animation: fresh 1.6s ease-out; }
+  @keyframes fresh { from { box-shadow: 0 0 0 3px color-mix(in srgb, var(--ins) 45%, transparent); } to { box-shadow: 0 0 0 0 transparent; } }
+
+  /* The right column: one balloon per thread, beside its passage. */
+  aside.rail { position: relative; min-height: 100%; }
+  .card {
+    position: absolute; left: 0; right: 0; background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 12px; font-size: 14px; line-height: 1.45; box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    transition: top .18s ease, box-shadow .15s ease;
+  }
+  .card.ask { border-left: 4px solid var(--ask); }
+  .card.comment { border-left: 4px solid var(--comment); }
+  .card.change { border-left: 4px solid var(--del); padding: 6px 10px; }
+  .card.active { box-shadow: var(--shadow); z-index: 2; }
+  .card .head { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .card .head .who { font-weight: 600; color: var(--fg); }
+  .card .head .grow { flex: 1; }
+  .card .head button.link { margin-left: 8px; }
+  .card .quote { color: var(--muted); font-style: italic; margin-bottom: 6px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .msg { margin: 6px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .msg .from { font-size: 12px; font-weight: 600; color: var(--muted); display: block; }
+  .msg.claude .from { color: var(--accent); }
+  .msg.error { color: var(--del); }
+  /* Each message says its mode: an ask only reads, a comment may change the text. */
+  .mode { font-size: 11px; font-weight: 600; border-radius: 4px; padding: 0 5px; margin-left: 6px; color: var(--fg); }
+  .mode.ask { background: var(--ask); }
+  .mode.comment { background: var(--comment); }
+  .modes { display: flex; gap: 4px; margin-top: 8px; }
+  .modes button { font: inherit; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--muted); padding: 1px 8px; cursor: pointer; }
+  .modes button.on.ask { background: var(--ask); border-color: var(--ask); color: var(--fg); }
+  .modes button.on.comment { background: var(--comment); border-color: var(--comment); color: var(--fg); }
+  .thinking { color: var(--muted); margin-top: 6px; }
+  .thinking::after { content: '…'; display: inline-block; animation: dots 1.2s steps(4, end) infinite; overflow: hidden; vertical-align: bottom; width: 0; }
+  @keyframes dots { to { width: 1.2em; } }
+  .card .actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .card textarea {
+    font: inherit; font-size: 13.5px; width: 100%; min-height: 34px; resize: vertical; padding: 5px 8px; margin-top: 4px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
+  }
+  .change .what { overflow-wrap: anywhere; }
+  .change .what del { color: var(--del); }
+  .change .what ins { color: var(--ins); text-decoration: none; }
+  button.x { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; }
+  button.icon { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 2px; border-radius: 4px; display: inline-flex; }
+  button.icon:hover { color: var(--fg); background: var(--line); }
+  button.icon.trash { color: var(--del); }
+  button.icon.trash:hover { color: var(--del); background: color-mix(in srgb, var(--del) 14%, transparent); }
+  button.icon svg { width: 14px; height: 14px; }
+  button.fold { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 11px; width: 14px; padding: 0; }
+  /* Collapsed: two lines, where and what on the first, how much was said and changed on the second. */
+  .card.collapsed { padding: 6px 10px; cursor: pointer; }
+  .card.collapsed .head { margin-bottom: 0; }
+  .card.collapsed .head .quote { flex: 1; min-width: 0; margin: 0; display: block; white-space: nowrap; text-overflow: ellipsis; color: var(--fg); }
+  .card.collapsed .tally { color: var(--muted); font-size: 12px; padding-left: 20px; }
+  /* Each round that changed the text can be accepted, taken back and made again. */
+  .round { display: flex; justify-content: flex-end; gap: 12px; margin-top: 2px; }
+  button.link.accept { color: var(--ins); }
+  .msg.undone { opacity: .55; }
+  .msg.undone .round { opacity: 1; }
+  button.link { border: 0; background: none; color: var(--accent); cursor: pointer; font: inherit; font-size: 12.5px; padding: 0; }
+
+  .bar {
+    position: fixed; top: 12px; right: 16px; z-index: 10; display: flex; gap: 6px; align-items: center;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; box-shadow: var(--shadow);
+  }
+  .bar .count { color: var(--muted); font-size: 13px; padding: 0 4px; white-space: nowrap; }
+  button.btn {
+    font: inherit; font-size: 14px; border-radius: 7px; padding: 5px 12px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: var(--fg);
+  }
+  button.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.btn.small { font-size: 12.5px; padding: 2px 8px; }
+  button.btn:disabled { opacity: .45; cursor: default; }
+
+  .pop {
+    position: absolute; z-index: 20; background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: var(--shadow); padding: 6px; display: flex; flex-direction: column; gap: 6px; min-width: 280px;
+  }
+  .pop .row { display: flex; gap: 6px; }
+  .pop .modes { margin-top: 0; }
+  .pop textarea {
+    font: inherit; font-size: 14px; width: 100%; min-height: 64px; resize: vertical; padding: 6px 8px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
+  }
+  .pop .hint { color: var(--muted); font-size: 12px; }
+  .offline { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--del); color: #fff; border-radius: 6px; padding: 4px 10px; font-size: 13px; }
+
+  /* Narrow: the balloons follow the text instead of sitting beside it. */
+  @media (max-width: 1150px) {
+    .layout { grid-template-columns: minmax(0, 1fr); max-width: 792px; margin: 0 auto; }
+    aside.rail { display: flex; flex-direction: column; gap: 8px; margin-top: 32px; }
+    aside.rail .card { position: static; }
+  }
+  @media (max-width: 600px) {
+    .layout { padding-top: 104px; }
+    section.seg { padding-left: 0; }
+    section.seg > .ln { display: none; }
+    .bar { left: 16px; right: 16px; flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<div class="bar">
+  <span class="count" id="count"></span>
+  <button class="btn" id="undo" title="Desfazer (⌘Z)">↶</button>
+  <button class="btn" id="redo" title="Refazer (⇧⌘Z)">↷</button>
+  <button class="btn primary" id="review" title="Grava as alterações no arquivo">Revisar</button>
+  <button class="btn" id="cancel" title="Descarta alterações e conversas">Cancelar</button>
+</div>
+<div class="layout" id="layout">
+  <main>
+    <header class="file" id="file">carregando…</header>
+    <div id="doc"></div>
+  </main>
+  <aside class="rail" id="rail"></aside>
+</div>
+<script>
+const TOKEN = new URLSearchParams(location.search).get('t') ?? ''
+const $ = id => document.getElementById(id)
+
+let view = null
+let shownVersion = -1
+let pop = null
+let active = null
+// What the person is typing in each balloon, kept across redraws.
+const drafts = new Map()
+// The mode chosen for each thread's next message, while it is being written.
+const modes = new Map()
+// Hunks seen before, so a new change flashes as it lands.
+let knownHunks = null
+
+function escapeHtml(text) {
+  return text.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+}
+
+if (window.marked) {
+  // The file's own HTML is shown as text, never run.
+  marked.use({ gfm: true, renderer: { html: token => escapeHtml(token.text ?? String(token)) } })
+}
+
+async function call(path, init = {}) {
+  const res = await fetch(path, { ...init, headers: { 'x-cotext-token': TOKEN, 'content-type': 'application/json' } })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+const act = action => call('/action', { method: 'POST', body: JSON.stringify(action) }).then(() => setTimeout(poll, 120))
+
+async function poll() {
+  try {
+    view = await call('/state')
+    document.querySelector('.offline')?.remove()
+    if (view.version !== shownVersion && !busy()) render()
+  } catch {
+    if (!document.querySelector('.offline')) {
+      const note = document.createElement('div')
+      note.className = 'offline'
+      note.textContent = 'cotext: sem conexão com o Claude Code'
+      document.body.append(note)
+    }
+  }
+}
+
+// A redraw would drop the person's selection or the popover being typed in.
+function busy() {
+  const selection = getSelection()
+  return pop !== null || (selection !== null && !selection.isCollapsed && $('doc').contains(selection.anchorNode))
+}
+
+// Start and end marks for each span, as private-use characters the renderer
+// passes through as text: U+E000/U+E001 then U+E100 + its index.
+const OPEN = '', CLOSE = '', BASE = 0xE100
+
+function render() {
+  shownVersion = view.version ?? 0
+  const doc = $('doc')
+  if (!view.file) {
+    $('file').textContent = 'Nenhum arquivo aberto: rode /cotext <arquivo> no Claude Code.'
+    doc.replaceChildren()
+    $('rail').replaceChildren()
+    updateBar()
+    return
+  }
+  const warnings = []
+  if (view.missing) warnings.push('o arquivo sumiu do disco')
+  if (view.stale) warnings.push('o arquivo mudou no disco desde o início da revisão: Revisar está bloqueado, Cancelar recarrega')
+  $('file').innerHTML = escapeHtml(view.file) + warnings.map(w => ` · <span class="warn">${escapeHtml(w)}</span>`).join('')
+  const isCode = view.syntax === 'code'
+  const spans = view.spans
+  const fresh = new Set(knownHunks === null ? [] : view.hunks.map(h => h.id).filter(id => !knownHunks.has(id)))
+  knownHunks = new Set(view.hunks.map(h => h.id))
+  const frag = document.createDocumentFragment()
+
+  view.segments.forEach((seg, i) => {
+    const section = document.createElement('section')
+    section.className = 'seg' + (isCode ? ' code' : '')
+    section.dataset.seg = String(i)
+
+    // Each span clipped to the block; marks go in from the end so earlier offsets hold.
+    const cuts = []
+    spans.forEach((one, n) => {
+      const start = Math.max(one.start, seg.start), end = Math.min(one.end, seg.end)
+      if (start > end || (start === end && one.kind !== 'thread')) return
+      cuts.push({ at: start - seg.start, text: OPEN + String.fromCharCode(BASE + n) })
+      cuts.push({ at: end - seg.start, text: CLOSE + String.fromCharCode(BASE + n) })
+    })
+    // At one offset an end goes before a start, so the start is inserted first.
+    cuts.sort((a, b) => b.at - a.at || (a.text[0] === OPEN ? -1 : 0) - (b.text[0] === OPEN ? -1 : 0))
+    let text = seg.text
+    for (const cut of cuts) text = text.slice(0, cut.at) + cut.text + text.slice(cut.at)
+
+    const ln = document.createElement('div')
+    ln.className = 'ln'
+    ln.textContent = isCode ? seg.text.split('\n').map((_, k) => seg.line + k).join('\n') : String(seg.line)
+    const body = document.createElement('div')
+    body.className = 'body'
+    if (isCode || !window.marked) body.innerHTML = `<pre><code>${escapeHtml(text)}</code></pre>`
+    else body.innerHTML = marked.parse(text)
+    for (const a of body.querySelectorAll('a[href]')) {
+      if (!/^(https?:|#|mailto:)/i.test(a.getAttribute('href'))) a.removeAttribute('href')
+      else a.target = '_blank'
+    }
+    paintMarks(body, spans, fresh)
+    section.append(ln, body)
+    frag.append(section)
+  })
+  doc.replaceChildren(frag)
+  renderRail()
+  updateBar()
+}
+
+// Splits the text nodes at the private-use marks and wraps what lies between
+// in <mark>s carrying every span open there.
+function paintMarks(root, spans, fresh) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const nodes = []
+  while (walker.nextNode()) nodes.push(walker.currentNode)
+  const open = []
+  for (const node of nodes) {
+    const text = node.nodeValue
+    if (!/[]/.test(text) && open.length === 0) continue
+    const parts = document.createDocumentFragment()
+    let run = ''
+    const flush = () => {
+      if (run === '') return
+      if (open.length === 0) parts.append(run)
+      else {
+        const mark = document.createElement('mark')
+        const classes = new Set()
+        for (const n of open) {
+          const one = spans[n]
+          if (one.kind === 'thread') { classes.add('hl'); mark.dataset.thread = one.id; if (one.id === active) classes.add('active') }
+          else { classes.add(one.kind); mark.dataset.hunk = one.id; if (fresh.has(one.id)) classes.add('fresh') }
+        }
+        mark.className = [...classes].join(' ')
+        mark.textContent = run
+        parts.append(mark)
+      }
+      run = ''
+    }
+    for (let k = 0; k < text.length; k++) {
+      const c = text[k]
+      if (c === OPEN || c === CLOSE) {
+        flush()
+        const n = text.charCodeAt(++k) - BASE
+        if (c === OPEN) open.push(n)
+        else open.splice(open.lastIndexOf(n), 1)
+      } else run += c
+    }
+    flush()
+    node.replaceWith(parts)
+  }
+}
+
+const LABEL = { ask: 'Pergunta', comment: 'Comentário' }
+const MODE = { ask: 'pergunta · só lê', comment: 'comentário · altera' }
+
+/** The mode of the person's last message on the thread. */
+function lastAsked(one) {
+  return one.messages.findLast(m => m.from === 'user')?.mode ?? one.mode
+}
+
+function renderRail() {
+  const rail = $('rail')
+  // Only a balloon being typed in keeps its focus across the redraw.
+  const focused = document.activeElement?.matches?.('.card textarea') ? document.activeElement.closest('.card').dataset.key : undefined
+  const cards = []
+  for (const one of view.threads) cards.push({ key: `t:${one.id}`, at: one.at, el: threadCard(one) })
+  // A change no thread made (an Excluir) gets a card of its own, to undo it.
+  for (const hunk of view.hunks.filter(h => h.threads.length === 0)) cards.push({ key: `h:${hunk.id}`, at: hunk.at, el: changeCard(hunk) })
+  for (const card of cards) card.el.dataset.key = card.key
+  rail.replaceChildren(...cards.map(card => card.el))
+  // Placed first: a balloon not yet placed sits at the top of the rail, and focusing it there would scroll the page.
+  placeCards()
+  if (focused) {
+    const area = rail.querySelector(`.card[data-key="${CSS.escape(focused)}"] textarea`)
+    if (area) { area.focus({ preventScroll: true }); area.setSelectionRange(area.value.length, area.value.length) }
+  }
+}
+
+// Collapsed or not as the person last chose, until the mod's view agrees.
+const folding = new Map()
+
+function isCollapsed(one) {
+  return folding.get(one.id) ?? one.collapsed
+}
+
+/** Collapses or expands a balloon at once; the mod is told, and keeps it. */
+function toggleCollapsed(one) {
+  const collapsed = !isCollapsed(one)
+  folding.set(one.id, collapsed)
+  renderRail()
+  act({ kind: 'collapse', thread: one.id, collapsed })
+}
+
+// Each balloon as near its passage as the ones above it allow.
+function placeCards() {
+  const rail = $('rail')
+  if (getComputedStyle(rail).display === 'flex') return
+  const top0 = rail.getBoundingClientRect().top
+  const placed = [...rail.children].map(el => {
+    const [kind, id] = el.dataset.key.split(':')
+    const mark = document.querySelector(`#doc mark[data-${kind === 't' ? 'thread' : 'hunk'}="${CSS.escape(id)}"]`)
+    return { el, want: mark ? mark.getBoundingClientRect().top - top0 : Infinity }
+  }).sort((a, b) => a.want - b.want)
+  let floor = 0
+  for (const one of placed) {
+    const top = Math.max(one.want === Infinity ? floor : one.want, floor)
+    one.el.style.top = `${top}px`
+    floor = top + one.el.offsetHeight + 8
+  }
+  rail.style.minHeight = `${floor}px`
+}
+
+const ICON = {
+  archive: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="3.5" rx="1"/><path d="M2.75 6v6.5a1 1 0 0 0 1 1h8.5a1 1 0 0 0 1-1V6M6.25 8.75h3.5"/></svg>',
+  trash: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4h11M6.25 4V2.75h3.5V4M4 4l.7 9.1a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9L12 4M6.75 6.75v4.5M9.25 6.75v4.5"/></svg>',
+}
+
+function iconButton(kind, title, onPress) {
+  const b = document.createElement('button')
+  b.className = `icon ${kind}`
+  b.title = title
+  b.setAttribute('aria-label', title)
+  b.innerHTML = ICON[kind]
+  b.onclick = e => { e.stopPropagation(); onPress() }
+  return b
+}
+
+function threadCard(one) {
+  if (folding.has(one.id) && folding.get(one.id) === one.collapsed) folding.delete(one.id)
+  one = { ...one, collapsed: isCollapsed(one) }
+  const card = document.createElement('div')
+  // Collapsed, it takes the colour of the last thing the person sent.
+  card.className = `card ${one.collapsed ? lastAsked(one) : one.mode}` + (one.id === active ? ' active' : '') + (one.collapsed ? ' collapsed' : '')
+  const head = document.createElement('div')
+  head.className = 'head'
+  const fold = document.createElement('button')
+  fold.className = 'fold'
+  fold.title = one.collapsed ? 'Expandir' : 'Recolher'
+  fold.setAttribute('aria-expanded', String(!one.collapsed))
+  fold.textContent = one.collapsed ? '▸' : '▾'
+  fold.onclick = e => { e.stopPropagation(); toggleCollapsed(one) }
+  head.append(fold)
+  const quote = document.createElement('div')
+  quote.className = 'quote'
+  quote.textContent = `“${one.quote}”`
+  if (one.collapsed) {
+    head.insertAdjacentHTML('beforeend', `<span>L${one.line}</span>`)
+    quote.title = one.quote
+    head.append(quote)
+  } else {
+    head.insertAdjacentHTML('beforeend', `<span class="who">${LABEL[one.mode]}</span><span>L${one.line}</span>` +
+      (one.detached ? '<span class="warn">(o trecho mudou)</span>' : '') + '<span class="grow"></span>')
+  }
+  if (one.status !== 'thinking') {
+    head.append(
+      iconButton('archive', 'Arquivar: desfaz as alterações não salvas e guarda a conversa em .review/archive', () => act({ kind: 'archive', thread: one.id })),
+      iconButton('trash', 'Apagar a conversa e desfazer suas alterações não salvas', () => act({ kind: 'trash', thread: one.id })),
+    )
+  }
+  // A collapsed balloon opens where it is; an open one shows its passage.
+  card.onclick = () => {
+    if (!one.collapsed) return setActive(one.id, true)
+    setActive(one.id, false)
+    toggleCollapsed(one)
+  }
+  if (one.collapsed) {
+    const said = one.messages.filter(m => m.from === 'claude').length
+    const tally = document.createElement('div')
+    tally.className = 'tally'
+    tally.textContent = [
+      `${said} ${said === 1 ? 'resposta' : 'respostas'}`,
+      `${one.changes} ${one.changes === 1 ? 'alteração' : 'alterações'}`,
+      ...(one.detached ? ['o trecho mudou'] : []),
+      ...(one.status === 'thinking' ? ['Claude está respondendo…'] : []),
+    ].join(' · ')
+    card.append(head, tally)
+    return card
+  }
+  card.append(head, quote)
+  for (const m of one.messages) {
+    if (m.from === 'user' && m.text === '') continue
+    const msg = document.createElement('div')
+    msg.className = `msg ${m.from}` + (one.status === 'error' && m === one.messages.at(-1) ? ' error' : '')
+    const from = document.createElement('span')
+    from.className = 'from'
+    from.textContent = m.from === 'user' ? 'Você' : 'Claude'
+    if (m.from === 'user') {
+      const badge = document.createElement('span')
+      badge.className = `mode ${m.mode}`
+      badge.textContent = MODE[m.mode]
+      from.append(badge)
+    }
+    msg.append(from, document.createTextNode(m.text))
+    // A round that changed the text: Desfazer puts it back as it was, Refazer applies it again.
+    if (m.round && (m.edits ?? []).some(edit => edit.applied)) {
+      if (m.undone) msg.classList.add('undone')
+      const row = document.createElement('div')
+      row.className = 'round'
+      // Aceitar writes this round's changes to the file now; the rest of the draft waits for Revisar.
+      if (!m.undone && (one.pending ?? []).includes(m.round)) {
+        const ok = document.createElement('button')
+        ok.className = 'link accept'
+        ok.textContent = '✓ Aceitar'
+        ok.title = 'Gravar no arquivo só as alterações desta resposta'
+        ok.onclick = e => { e.stopPropagation(); act({ kind: 'acceptRound', thread: one.id, round: m.round }) }
+        row.append(ok)
+      }
+      const b = document.createElement('button')
+      b.className = 'link'
+      b.textContent = m.undone ? '↷ Refazer' : '↶ Desfazer'
+      b.title = m.undone ? 'Aplicar esta edição de novo' : 'Voltar o texto ao que era antes desta resposta'
+      b.onclick = e => { e.stopPropagation(); act({ kind: m.undone ? 'redoRound' : 'undoRound', thread: one.id, round: m.round }) }
+      row.append(b)
+      msg.append(row)
+    }
+    card.append(msg)
+  }
+  if (one.status === 'thinking') {
+    const t = document.createElement('div')
+    t.className = 'thinking'
+    t.textContent = lastAsked(one) === 'ask' ? 'Claude está respondendo' : 'Claude está revisando'
+    card.append(t)
+  }
+  if (one.status !== 'thinking') {
+    // Every message is sent in a mode the person picks: an ask only reads, a comment may change the text.
+    const mode = () => modes.get(one.id) ?? lastAsked(one)
+    const area = document.createElement('textarea')
+    const picker = modePicker(area, mode, value => modes.set(one.id, value), {
+      ask: 'Perguntar (não altera o texto)…',
+      comment: 'Comentar: o que mudar aqui?',
+    })
+    area.rows = 1
+    area.value = drafts.get(one.id) ?? ''
+    area.oninput = () => drafts.set(one.id, area.value)
+    area.onkeydown = e => {
+      if (picker.onKey(e)) return
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        const text = area.value.trim()
+        if (text === '') return
+        drafts.delete(one.id)
+        act({ kind: 'reply', thread: one.id, mode: mode(), message: text })
+        modes.delete(one.id)
+      }
+    }
+    card.append(picker, area)
+  }
+  return card
+}
+
+/**
+ * The Perguntar / Comentar switch over a text field: a click or Shift+Tab in
+ * the field flips it. `onKey` answers whether it took the key.
+ */
+function modePicker(area, get, set, placeholders) {
+  const picker = document.createElement('div')
+  picker.className = 'modes'
+  const show = () => {
+    for (const b of picker.children) b.classList.toggle('on', b.dataset.mode === get())
+    area.placeholder = placeholders[get()]
+  }
+  const pick = value => { set(value); show(); area.focus() }
+  for (const [value, label] of [['ask', 'Perguntar'], ['comment', 'Comentar']]) {
+    const b = document.createElement('button')
+    b.className = value
+    b.dataset.mode = value
+    b.textContent = label
+    b.title = (value === 'ask' ? 'Só leitura: Claude responde sem alterar o texto' : 'Escrita: Claude pode alterar o texto') + ' · Shift+Tab alterna'
+    b.onmousedown = e => e.preventDefault()
+    b.onclick = e => { e.stopPropagation(); pick(value) }
+    picker.append(b)
+  }
+  picker.onKey = e => {
+    if (e.key !== 'Tab' || !e.shiftKey) return false
+    e.preventDefault()
+    pick(get() === 'ask' ? 'comment' : 'ask')
+    return true
+  }
+  show()
+  return picker
+}
+
+function changeCard(hunk) {
+  const card = document.createElement('div')
+  card.className = 'card change'
+  const head = document.createElement('div')
+  head.className = 'head'
+  head.innerHTML = `<span class="who">${hunk.added === '' ? 'Exclusão' : 'Alteração'}</span><span class="grow"></span>`
+  const undoIt = document.createElement('button')
+  undoIt.className = 'link'
+  undoIt.textContent = '↶ desfazer'
+  undoIt.onclick = () => act({ kind: 'revert', hunk: hunk.id })
+  const ok = document.createElement('button')
+  ok.className = 'link accept'
+  ok.textContent = '✓ aceitar'
+  ok.title = 'Gravar no arquivo só esta alteração'
+  ok.onclick = () => act({ kind: 'acceptHunk', hunk: hunk.id })
+  head.append(ok, undoIt)
+  const what = document.createElement('div')
+  what.className = 'what'
+  const cut = text => (text.length > 120 ? text.slice(0, 119) + '…' : text)
+  if (hunk.removed) { const d = document.createElement('del'); d.textContent = cut(hunk.removed); what.append(d) }
+  if (hunk.added) { const i = document.createElement('ins'); i.textContent = cut(hunk.added); what.append(' ', i) }
+  card.append(head, what)
+  return card
+}
+
+function setActive(id, scroll) {
+  active = id
+  for (const m of document.querySelectorAll('#doc mark.hl')) m.classList.toggle('active', m.dataset.thread === id)
+  for (const c of document.querySelectorAll('#rail .card')) c.classList.toggle('active', c.dataset.key === `t:${id}`)
+  if (scroll) document.querySelector(`#doc mark[data-thread="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+}
+
+function updateBar() {
+  const changes = view?.hunks?.length ?? 0
+  const thinking = (view?.threads ?? []).filter(one => one.status === 'thinking').length
+  const parts = [changes === 0 ? 'sem alterações' : changes === 1 ? '1 alteração' : `${changes} alterações`]
+  if (thinking > 0) parts.push('Claude trabalhando…')
+  $('count').textContent = parts.join(' · ')
+  $('undo').disabled = !view?.canUndo
+  $('redo').disabled = !view?.canRedo
+  $('review').disabled = changes === 0 || !!view?.stale
+  $('cancel').disabled = changes === 0 && (view?.threads ?? []).length === 0
+}
+
+$('undo').onclick = () => act({ kind: 'undo' })
+$('redo').onclick = () => act({ kind: 'redo' })
+$('review').onclick = () => act({ kind: 'review' })
+$('cancel').onclick = () => {
+  if (confirm('Descartar todas as alterações e conversas desta revisão?')) act({ kind: 'cancel' })
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && pop) return closePop()
+  if (e.target.closest?.('textarea, input')) return
+  const mod = e.metaKey || e.ctrlKey
+  if (mod && e.key.toLowerCase() === 'z') {
+    e.preventDefault()
+    act({ kind: e.shiftKey ? 'redo' : 'undo' })
+  } else if (mod && e.key.toLowerCase() === 'y') {
+    e.preventDefault()
+    act({ kind: 'redo' })
+  }
+})
+
+// A click on a highlight or a change shows its balloon.
+$('doc').addEventListener('click', e => {
+  const mark = e.target.closest?.('mark')
+  if (!mark || !getSelection().isCollapsed) return
+  let card = null
+  if (mark.dataset.thread) {
+    setActive(mark.dataset.thread, false)
+    card = document.querySelector(`#rail .card[data-key="t:${CSS.escape(mark.dataset.thread)}"]`)
+  } else if (mark.dataset.hunk) {
+    const hunk = view.hunks.find(h => h.id === mark.dataset.hunk)
+    const owner = hunk?.threads[0]
+    if (owner) setActive(owner, false)
+    card = document.querySelector(`#rail .card[data-key="${owner ? `t:${CSS.escape(owner)}` : `h:${CSS.escape(mark.dataset.hunk)}`}"]`)
+  }
+  card?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+})
+
+document.addEventListener('mouseup', e => {
+  if (pop?.contains(e.target) || e.target.closest?.('.bar, aside.rail')) return
+  setTimeout(showActions, 0)
+})
+
+document.addEventListener('mousedown', e => {
+  if (pop && !pop.contains(e.target)) closePop()
+})
+
+addEventListener('resize', () => view && placeCards())
+
+function closePop() {
+  pop?.remove()
+  pop = null
+  if (view && view.version !== shownVersion && !busy()) render()
+}
+
+function showActions() {
+  const selection = getSelection()
+  if (!selection || selection.isCollapsed || !$('doc').contains(selection.anchorNode)) return
+  const text = selection.toString()
+  if (text.trim() === '') return
+  const range = selection.getRangeAt(0)
+  const section = (range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement).closest('section.seg')
+  if (!section) return
+  const body = section.querySelector('.body')
+  const before = document.createRange()
+  before.selectNodeContents(body)
+  before.setEnd(range.startContainer, range.startOffset)
+  const after = document.createRange()
+  after.selectNodeContents(body)
+  after.setStart(range.endContainer, range.endOffset)
+  const target = {
+    text,
+    seg: Number(section.dataset.seg),
+    contextBefore: before.toString().slice(-60),
+    contextAfter: after.toString().slice(0, 60),
+  }
+
+  closePop()
+  pop = document.createElement('div')
+  pop.className = 'pop'
+  const row = document.createElement('div')
+  row.className = 'row'
+  for (const [kind, label] of [['ask', 'Questionar'], ['comment', 'Comentar'], ['delete', 'Excluir']]) {
+    const b = document.createElement('button')
+    b.className = 'btn'
+    b.textContent = label
+    b.onclick = () => (kind === 'delete' ? send({ kind: 'delete', ...target }) : askNote(target, kind))
+    row.append(b)
+  }
+  pop.append(row)
+  const rect = range.getBoundingClientRect()
+  pop.style.top = `${rect.bottom + scrollY + 6}px`
+  pop.style.left = `${Math.max(8, Math.min(rect.left + scrollX, scrollX + innerWidth - 300))}px`
+  document.body.append(pop)
+}
+
+function askNote(target, mode) {
+  pop.replaceChildren()
+  const area = document.createElement('textarea')
+  const picker = modePicker(area, () => mode, value => { mode = value }, {
+    ask: 'Sua pergunta (opcional; não altera o texto)',
+    comment: 'Seu comentário: o que mudar aqui?',
+  })
+  const hint = document.createElement('div')
+  hint.className = 'hint'
+  hint.textContent = 'Enter envia ao Claude · Shift+Enter quebra linha · Shift+Tab muda o modo · Esc cancela'
+  area.onkeydown = e => {
+    if (picker.onKey(e)) return
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      const note = area.value.trim()
+      if (mode === 'comment' && note === '') return
+      send({ kind: 'open', mode, message: note, ...target })
+    }
+  }
+  pop.append(picker, area, hint)
+  area.focus()
+}
+
+async function send(action) {
+  closePop()
+  getSelection().removeAllRanges()
+  try {
+    await act(action)
+  } catch (error) {
+    alert(`cotext: ${error.message}`)
+  }
+}
+
+poll()
+setInterval(poll, 700)
+</script>
+</body>
+</html>

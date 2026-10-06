@@ -1,6 +1,6 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
-import { OPEN, PANE, fakeHost } from './fake-host'
+import { DONE, OPEN, fakeHost } from './fake-host'
 
 const SYNC = [
   'export class BookmarkSyncService {',
@@ -12,42 +12,22 @@ const SYNC = [
   '',
 ].join('\n')
 
-for (const surface of ['terminal', 'desktop'] as const) {
-  test(`reviews code by line and symbol, across files, on ${surface}`, async ($, on) => {
-    const host = fakeHost(on, { 'src/sync.ts': SYNC, 'spec.md': '# Spec\n\nUse batches.\n' })
+test('reviews code by line and symbol, and the reviser edits it in place', async ($, on) => {
+  const clock = mock.clock(on)
+  const host = fakeHost(on, { 'src/sync.ts': SYNC })
 
-    // A Markdown annotation first, so the project scope has two files.
-    await $.command.run(OPEN('spec.md'))
-    const ui = await $.ui.mount({ plugin: 'cotext', surface, ...PANE })
-    host.select('Use batches.')
-    await ui.press({ key: 'highlight' })
+  await $.command.run(OPEN('src/sync.ts'))
+  expect(host.view()).toMatchObject({ file: 'src/sync.ts', syntax: 'code' })
+  expect(host.view()!.segments).toHaveLength(1)
 
-    await $.command.run(OPEN('src/sync.ts'))
-    const drawn = JSON.stringify(await ui.drawn())
-    expect(drawn).toContain('"startLine":1')
+  host.page({ kind: 'open', mode: 'comment', text: 'const batch = items.slice(0, 10)', seg: 0, message: 'Use BATCH_SIZE.' })
+  await clock.advance(2000)
+  expect(host.spawned[0]!.prompt).toContain('The selected passage (L3, in BookmarkSyncService.sync)')
 
-    // The gutter's numbers ride along with a selection in a code view.
-    host.select('3     const batch = items.slice(0, 10)')
-    await ui.press({ key: 'reject' })
-    await ui.input({ key: 'note', text: 'Why 10?' })
-    expect(host.saved()[1]!.anchor).toMatchObject({
-      lineStart: 3,
-      symbol: 'BookmarkSyncService.sync',
-      selectedText: 'const batch = items.slice(0, 10)',
-    })
-
-    await ui.press({ key: 'send-review' })
-    expect(host.submitted[0]).toContain('src/sync.ts')
-    expect(host.submitted[0]).not.toContain('spec.md')
-    expect(host.submitted[0]).toContain('ANNOTATION 1: reject (L3, in BookmarkSyncService.sync)')
-    await $.turn.start({ text: host.submitted[0]!, turnId: 't3' })
-    await $.turn.complete({ turnId: 't3', answer: '', durationMs: 1, isAborted: false, reason: 'answer' })
-
-    await ui.press({ key: 'scope' })
-    expect(await ui.find({ key: 'send-review', text: 'Review project' })).toBeDefined()
-    await ui.press({ key: 'send-review' })
-    expect(host.submitted[1]).toContain('## spec.md')
-    expect(host.submitted[1]).toContain('## src/sync.ts')
-    await ui.unmount()
-  })
-}
+  await $.turn.complete(DONE(host.view()!.threads[0]!.id, 'Feito.', [{ old: 'slice(0, 10)', new: 'slice(0, BATCH_SIZE)' }]))
+  expect(host.view()!.hunks).toMatchObject([{ removed: '10', added: 'BATCH_SIZE' }])
+  expect(host.files.get('src/sync.ts')).toBe(SYNC)
+  host.page({ kind: 'review' })
+  await clock.advance(2000)
+  expect(host.files.get('src/sync.ts')).toBe(SYNC.replace('slice(0, 10)', 'slice(0, BATCH_SIZE)'))
+})

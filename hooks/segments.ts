@@ -1,6 +1,6 @@
-// The pane draws the file as a run of blocks so annotations can be marked
-// between them: Markdown ends a block at a blank line outside a code fence,
-// code every few dozen lines.
+// The page draws the file as a run of blocks so notes can sit between them
+// and a selection is searched in its own: Markdown ends a block at a blank
+// line outside a code fence, code every few dozen lines.
 
 import type { Syntax } from './anchor'
 
@@ -96,20 +96,4 @@ function lineAt(source: string, offset: number): number {
   for (let i = source.indexOf('\n'); i !== -1 && i < offset; i = source.indexOf('\n', i + 1)) line++
 
   return line
-}
-
-/**
- * What the keyboard cursor steps over: a Markdown block, or a code line.
- * Blank lines are skipped; `end` is exclusive, as a segment's.
- */
-export function units(source: string, syntax: Syntax): Segment[] {
-  if (syntax === 'markdown') return segment(source)
-  const found: Segment[] = []
-  let start = 0
-  source.split('\n').forEach((text, i) => {
-    if (text.trim() !== '') found.push({ start, end: start + text.length, line: i + 1, text })
-    start += text.length + 1
-  })
-
-  return found
 }

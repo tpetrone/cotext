@@ -1,6 +1,6 @@
 {
   "name": "cotext",
   "version": "0.1.0",
-  "description": "Review a Markdown file in a pane: select, annotate, then send the whole review to Claude at once",
+  "description": "Review a file in the browser: question, comment or delete a passage; a subagent answers and its edits show as tracked revisions; Revisar saves",
   "types": "./types/index.d.ts"
 }

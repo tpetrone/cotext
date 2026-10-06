@@ -1,11 +1,8 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
-import { OPEN, PANE, fakeHost } from './fake-host'
+import { OPEN, fakeHost } from './fake-host'
 
 const SPEC = ['# Plan', '', 'SQLite será o storage.', '', 'A API será REST.', ''].join('\n')
-
-const COMPLETE = (turnId: string) =>
-  ({ turnId, answer: '', durationMs: 1, isAborted: false, reason: 'answer' }) as const
 
 const EDIT = {
   tool: 'Edit',
@@ -14,120 +11,47 @@ const EDIT = {
   new_string: '# Plan\n\nIntro.\n',
 } as const
 
-for (const surface of ['terminal', 'desktop'] as const) {
-  test(`a Review turn blocks edits and Claude resolves annotations on ${surface}`, async ($, on) => {
-    const host = fakeHost(on, { 'spec.md': SPEC })
-    await $.command.run(OPEN('spec.md'))
-    const ui = await $.ui.mount({ plugin: 'cotext', surface, ...PANE })
-    host.select('SQLite será o storage.')
-    await ui.press({ key: 'highlight' })
-    host.select('A API será REST.')
-    await ui.press({ key: 'accept' })
+test('an edit on disk with no changes in the draft becomes its base, the threads following', async ($, on) => {
+  const clock = mock.clock(on)
+  const host = fakeHost(on, { 'spec.md': SPEC })
+  await $.command.run(OPEN('spec.md'))
+  host.page({ kind: 'open', mode: 'ask', text: 'A API será REST.', seg: 2 })
+  await clock.advance(2000)
+  expect(host.view()!.threads[0]!.line).toBe(5)
 
-    await ui.press({ key: 'send-review' })
-    await $.turn.start({ text: host.submitted[0]!, turnId: 't1' })
+  // Claude edits the file in the conversation: the page follows at once.
+  await $.tool.call(EDIT)
+  expect(host.shown()).toContain('Intro.')
+  expect(host.view()).toMatchObject({ stale: false, threads: [{ line: 7, detached: false }] })
+})
 
-    const blocked = await $.tool.call(EDIT)
-    expect(blocked.deny).toContain('Review turn')
-    expect(host.files.get('spec.md')).toBe(SPEC)
+test('an edit on disk while the draft holds changes blocks Revisar until Cancelar', async ($, on) => {
+  const clock = mock.clock(on)
+  const host = fakeHost(on, { 'spec.md': SPEC })
+  await $.command.run(OPEN('spec.md'))
+  host.page({ kind: 'delete', text: 'SQLite será o storage.', seg: 1 })
+  await clock.advance(2000)
 
-    const reply = await $.tool.call({
-      tool: 'mcp__cotext__resolve_annotations',
-      items: [
-        { n: 1, status: 'needs_human', summary: 'Depende do volume esperado.' },
-        { n: 2, status: 'resolved', summary: 'Mantido.' },
-      ],
-    })
-    expect(reply.result).toBe('Recorded 2 of 2 annotations.')
-    expect(host.saved().map(one => one.status)).toEqual(['needs_human', 'resolved'])
-    await ui.press({ key: 'notes' })
-    expect(await ui.find({ text: /Depende do volume esperado/ })).toBeDefined()
-    expect(await ui.find({ key: 'resolved' })).toBeDefined()
+  host.files.set('spec.md', SPEC.replace('REST', 'GraphQL'))
+  await clock.advance(2000)
+  expect(host.view()!.stale).toBe(true)
 
-    await $.turn.complete(COMPLETE('t1'))
-    expect(host.toasts.at(-1)).toBe('cotext: 1 resolved, 1 need you.')
+  host.page({ kind: 'review' })
+  await clock.advance(2000)
+  expect(host.files.get('spec.md')).toBe(SPEC.replace('REST', 'GraphQL'))
+  expect(host.toasts.at(-1)).toMatch(/changed on disk since the review began/)
 
-    // The lock ends with its turn.
-    const allowed = await $.tool.call(EDIT)
-    expect(allowed.deny).toBeUndefined()
-    await ui.unmount()
-  })
+  host.page({ kind: 'cancel' })
+  await clock.advance(2000)
+  expect(host.view()).toMatchObject({ stale: false, hunks: [] })
+  expect(host.shown()).toContain('GraphQL')
+})
 
-  test(`an Apply turn edits and the annotations follow the text on ${surface}`, async ($, on) => {
-    const host = fakeHost(on, { 'spec.md': SPEC })
-    await $.command.run(OPEN('spec.md'))
-    const ui = await $.ui.mount({ plugin: 'cotext', surface, ...PANE })
-    host.select('A API será REST.')
-    await ui.press({ key: 'highlight' })
-    expect(host.saved()[0]!.anchor.lineStart).toBe(5)
-
-    await ui.press({ key: 'send-apply' })
-    expect(host.submitted[0]).toContain('Mode: APPLY')
-    await $.turn.start({ text: host.submitted[0]!, turnId: 't2' })
-
-    const edited = await $.tool.call(EDIT)
-    expect(edited.deny).toBeUndefined()
-    expect(host.saved()[0]!.anchor.lineStart).toBe(7)
-    await ui.press({ key: 'notes' })
-    expect(await ui.find({ text: /\[H\] L7/ })).toBeDefined()
-
-    await $.turn.complete(COMPLETE('t2'))
-    expect(host.toasts.at(-1)).toBe('cotext: 0 resolved, 0 need you, 1 not reported back.')
-    await ui.unmount()
-  })
-
-  test(`a handed-back decision closes by id later, across a rename, on ${surface}`, async ($, on) => {
-    const host = fakeHost(on, { 'skills/expand/SKILL.md': SPEC })
-    await $.command.run(OPEN('skills/expand/SKILL.md'))
-    const ui = await $.ui.mount({ plugin: 'cotext', surface, ...PANE })
-    host.select('A API será REST.')
-    await ui.press({ key: 'highlight' })
-    const id = host.saved()[0]!.id
-
-    await ui.press({ key: 'send-review' })
-    expect(host.submitted[0]).toContain(`ANNOTATION 1: highlight (L5) · id ${id}`)
-    await $.turn.start({ text: host.submitted[0]!, turnId: 't1' })
-    await $.tool.call({
-      tool: 'mcp__cotext__resolve_annotations',
-      items: [{ n: 1, status: 'needs_human', summary: 'REST ou gRPC?' }],
-    })
-    await $.turn.complete(COMPLETE('t1'))
-
-    // In plain chat the user decides, Claude rewrites the passage and moves the file.
-    host.files.delete('skills/expand/SKILL.md')
-    host.files.set('skills/expandir/SKILL.md', SPEC.replace('A API será REST.', 'A API será gRPC.'))
-    host.renames = [['skills/expand/SKILL.md', 'skills/expandir/SKILL.md']]
-    await $.turn.complete(COMPLETE('t2'))
-    expect(host.saved()[0]).toMatchObject({ file: 'skills/expandir/SKILL.md', detached: 'text' })
-    await ui.press({ key: 'notes' })
-    expect(await ui.find({ text: /\[H\] L5 .*\(text changed\)/ })).toBeDefined()
-
-    // No review is open: the tool lists what waits, and closes it by id.
-    const listed = await $.tool.call({ tool: 'mcp__cotext__resolve_annotations', items: [] })
-    expect(listed.result).toContain(`id ${id}: skills/expandir/SKILL.md L5 (text changed): REST ou gRPC?`)
-    const closed = await $.tool.call({
-      tool: 'mcp__cotext__resolve_annotations',
-      items: [{ id, status: 'resolved', summary: 'Trocado para gRPC.' }],
-    })
-    expect(closed.result).toBe('Recorded 1 annotation.')
-    expect(host.saved()[0]!.status).toBe('resolved')
-    await ui.unmount()
-  })
-
-  test(`an annotation whose file is gone with no rename is detached on ${surface}`, async ($, on) => {
-    const host = fakeHost(on, { 'spec.md': SPEC, 'other.md': '# Other\n' })
-    await $.command.run(OPEN('spec.md'))
-    const ui = await $.ui.mount({ plugin: 'cotext', surface, ...PANE })
-    host.select('A API será REST.')
-    await ui.press({ key: 'highlight' })
-    await $.command.run(OPEN('other.md'))
-
-    host.files.delete('spec.md')
-    await $.turn.complete(COMPLETE('t1'))
-    expect(host.saved()[0]!.detached).toBe('file')
-    await ui.press({ key: 'scope' })
-    await ui.press({ key: 'notes' })
-    expect(await ui.find({ text: /\(file gone\)/ })).toBeDefined()
-    await ui.unmount()
-  })
-}
+test('the file gone from disk is flagged', async ($, on) => {
+  const clock = mock.clock(on)
+  const host = fakeHost(on, { 'spec.md': SPEC })
+  await $.command.run(OPEN('spec.md'))
+  host.files.delete('spec.md')
+  await clock.advance(2000)
+  expect(host.view()!.missing).toBe(true)
+})
