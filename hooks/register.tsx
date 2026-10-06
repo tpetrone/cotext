@@ -89,6 +89,7 @@ type Selection = { text: string; seg: number; contextBefore?: string; contextAft
 type Action =
   | ({ kind: 'open'; mode: Mode; message?: string } & Selection)
   | ({ kind: 'delete' } & Selection)
+  | { kind: 'openDoc'; mode: Mode; message: string }
   | { kind: 'reply'; thread: string; mode: Mode; message: string }
   | { kind: 'archive'; thread: string }
   | { kind: 'trash'; thread: string }
@@ -228,7 +229,7 @@ export const register: Register = on => {
           {threads.map(one => (
             <Box key={`row-${one.id}`} flexDirection="column">
               <Text color={one.mode === 'ask' ? 'yellow' : 'blue'} wrap="truncate-end">
-                {`[${one.mode === 'ask' ? '?' : 'C'}] ${excerpt(one.messages[0]?.text || one.quote, width)}`}
+                {`[${one.mode === 'ask' ? '?' : 'C'}] ${one.scope === 'doc' ? 'doc · ' : ''}${excerpt(one.messages[0]?.text || one.quote, width)}`}
               </Text>
               {one.status === 'thinking' ? (
                 <Text dimColor>{'    ↳ …'}</Text>
@@ -370,6 +371,8 @@ async function handle($: EngineInterface, action: Action): Promise<void> {
       return open($, action)
     case 'delete':
       return deletePassage($, action)
+    case 'openDoc':
+      return openDoc($, action)
     case 'reply':
       return reply($, action.thread, action.mode, action.message)
     case 'archive':
@@ -437,7 +440,7 @@ async function postView($: EngineInterface): Promise<void> {
     spans: [
       ...shown.spans.map(one => ({ kind: one.kind, start: one.start, end: one.end, id: one.hunk })),
       ...threads
-        .filter(one => !one.detached)
+        .filter(one => !one.detached && one.scope !== 'doc')
         .map(one => ({
           kind: 'thread' as const,
           start: baseToDisplay(hunks, one.start, 'start'),
@@ -461,6 +464,7 @@ async function postView($: EngineInterface): Promise<void> {
       messages: one.messages,
       detached: one.detached === true,
       collapsed: one.collapsed === true,
+      ...(one.scope === undefined ? {} : { scope: one.scope }),
       at: baseToDisplay(hunks, one.start, 'start'),
       line: lineAt(lines, baseToWorking(hunks, one.start, 'start')),
       changes: hunks.filter(hunk => hunk.threads.includes(one.id)).length,
@@ -556,8 +560,10 @@ async function startOver($: EngineInterface, base: string, threads: Thread[]): P
 
 /**
  * Looks at the open file on disk. A change made there while the draft holds
- * none becomes the new base, the threads following their passages; one made
- * while it holds changes marks the draft stale, since Revisar would overwrite it.
+ * none, and nothing for Desfazer or Refazer, becomes the new base, the threads
+ * following their passages. Otherwise it marks the draft stale, since Revisar
+ * would overwrite it, until Cancelar: a Desfazer that empties the draft keeps
+ * the old base, and Refazer with it.
  */
 async function sync($: EngineInterface): Promise<void> {
   const file = await read($, fileAtom)
@@ -573,15 +579,18 @@ async function sync($: EngineInterface): Promise<void> {
   if (await read($, missingAtom)) await update($, missingAtom, () => false)
   const disk = await $.fs.read(file)
   const base = await read($, baseAtom)
-  const hunks = await read($, hunksAtom)
+  const stale = await read($, staleAtom)
+  const isQuiet =
+    !stale &&
+    (await read($, hunksAtom)).length === 0 &&
+    (await read($, pastAtom)).length === 0 &&
+    (await read($, futureAtom)).length === 0
   if (disk === base) {
-    if (await read($, staleAtom)) await update($, staleAtom, () => false)
-  } else if (hunks.length === 0) {
+    if (stale) await update($, staleAtom, () => false)
+  } else if (isQuiet) {
     await update($, baseAtom, () => disk)
-    await update($, pastAtom, () => [])
-    await update($, futureAtom, () => [])
     await update($, threadsAtom, list => list.map(one => follow(one, base, disk)))
-  } else if (!(await read($, staleAtom))) {
+  } else if (!stale) {
     await update($, staleAtom, () => true)
     void $.ui.toast(`cotext: ${file} changed on disk; Revisar would overwrite it. Cancelar takes the new text.`)
   }
@@ -590,6 +599,7 @@ async function sync($: EngineInterface): Promise<void> {
 
 /** A thread in `now`: where its passage still is, the one nearest its old place, or detached. */
 function follow(thread: Thread, was: string, now: string): Thread {
+  if (thread.scope === 'doc') return thread
   const text = was.slice(thread.start, thread.end)
   if (now.slice(thread.start, thread.end) === text) return thread
   let best: number | undefined
@@ -679,6 +689,25 @@ async function open($: EngineInterface, action: Extract<Action, { kind: 'open' }
   await runReviser($, thread.id)
 }
 
+/** Perguntar or Comentar from the page's dock: a thread on the whole document, and a reviser to answer it. */
+async function openDoc($: EngineInterface, action: Extract<Action, { kind: 'openDoc' }>): Promise<void> {
+  if (!MODES.includes(action.mode) || (await read($, fileAtom)) === null) return
+  const message = typeof action.message === 'string' ? action.message.trim() : ''
+  if (message === '') return void $.ui.toast('cotext: a message about the whole document needs text.')
+  const thread: Thread = {
+    id: randomId(),
+    mode: action.mode,
+    scope: 'doc',
+    start: 0,
+    end: 0,
+    quote: '',
+    messages: [{ from: 'user', text: message, at: new Date().toISOString(), mode: action.mode }],
+    status: 'idle',
+  }
+  await update($, threadsAtom, list => [...list, thread])
+  await runReviser($, thread.id)
+}
+
 /** A message on a thread, in the mode the person chose for it. */
 async function reply($: EngineInterface, id: string, mode: Mode, message: string): Promise<void> {
   if (!MODES.includes(mode)) return
@@ -690,7 +719,10 @@ async function reply($: EngineInterface, id: string, mode: Mode, message: string
   await runReviser($, id)
 }
 
-/** Spawns a reviser on the thread's passage as the draft has it now; its `turn.complete` brings the answer. */
+/**
+ * Spawns a reviser on the thread's passage, or the whole document, as the
+ * draft has it now; its `turn.complete` brings the answer.
+ */
 async function runReviser($: EngineInterface, id: string): Promise<void> {
   const file = await read($, fileAtom)
   const thread = (await read($, threadsAtom)).find(one => one.id === id)
@@ -706,14 +738,18 @@ async function runReviser($: EngineInterface, id: string): Promise<void> {
     id,
     file,
     draft,
-    passage: {
-      start,
-      end,
-      text: draft.slice(start, end),
-      lineStart,
-      lineEnd: lineAt(lines, Math.max(start, end - 1)),
-      ...(symbol === undefined ? {} : { symbol }),
-    },
+    ...(thread.scope === 'doc'
+      ? {}
+      : {
+          passage: {
+            start,
+            end,
+            text: draft.slice(start, end),
+            lineStart,
+            lineEnd: lineAt(lines, Math.max(start, end - 1)),
+            ...(symbol === undefined ? {} : { symbol }),
+          },
+        }),
     thread,
   })
   await editThread($, id, one => ({ ...one, status: 'thinking' }))

@@ -82,6 +82,8 @@ export type Thread = {
   detached?: boolean
   /** Its balloon shows only its head. */
   collapsed?: boolean
+  /** About the whole document, no passage: anchored at 0..0, never marked in the text nor detached. */
+  scope?: 'doc'
 }
 
 /** One state of the draft for Desfazer and Refazer: the hunks, and the rounds taken back then. */

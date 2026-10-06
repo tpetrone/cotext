@@ -48,3 +48,15 @@ test('the ask carries the draft, the passage and the thread so far', () => {
   expect(ask).toContain('Person (ask): Por quê?\nYou: É local.')
   expect(ask.endsWith('The person asks (ask: read-only, propose no edits):\nE concorrência?\n\nThread id: t1')).toBe(true)
 })
+
+test('with no passage, the ask is about the whole document', () => {
+  const ask = buildAsk({
+    id: 't2',
+    file: 'spec.md',
+    draft: '# Plan\n\nSQLite.\n',
+    thread: { messages: [{ from: 'user', text: '', at: '', mode: 'comment' }] },
+  })
+  expect(ask).toContain("</draft>\n\nThe person's message is about the whole document (no passage selected).\n\n")
+  expect(ask).not.toContain('<passage>')
+  expect(ask.endsWith('The person comments (comment: act on it):\nImprove this document.\n\nThread id: t2')).toBe(true)
+})

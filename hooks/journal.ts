@@ -155,18 +155,21 @@ function fromV2(journal: JournalV2): Journal {
 
 /**
  * The journal's threads on `source`, the file as it is now: each found again
- * by its text and context, or detached. A thread whose reviser was running is
- * marked interrupted; one whose proposals were never saved is told they are
- * gone, and their rounds are taken back so Refazer can bring them again.
+ * by its text and context, or detached; one about the whole document stays at
+ * 0..0. A thread whose reviser was running is marked interrupted; one whose
+ * proposals were never saved is told they are gone, and their rounds are taken
+ * back so Refazer can bring them again.
  */
 export function restoreThreads(journal: Journal, source: string, syntax: Syntax, at: string): Thread[] {
   return journal.threads.map(saved => {
     const { anchor, pending, detached, ...rest } = saved
-    const found = detached === true ? null : relocate(source, anchor, syntax)
+    const found = detached === true || rest.scope === 'doc' ? null : relocate(source, anchor, syntax)
     let thread: Thread =
-      found === null
-        ? { ...rest, start: Math.min(anchor.start, source.length), end: Math.min(anchor.end, source.length), detached: true }
-        : { ...rest, start: found.start, end: found.end }
+      rest.scope === 'doc'
+        ? { ...rest, start: 0, end: 0 }
+        : found === null
+          ? { ...rest, start: Math.min(anchor.start, source.length), end: Math.min(anchor.end, source.length), detached: true }
+          : { ...rest, start: found.start, end: found.end }
     if (thread.status === 'thinking') {
       thread = { ...thread, status: 'error', messages: [...thread.messages, { from: 'claude', text: INTERRUPTED, at, mode: lastAsked(thread) }] }
     }

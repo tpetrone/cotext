@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { OPEN, fakeHost } from './fake-host'
+import { DONE, OPEN, fakeHost } from './fake-host'
 
 const SPEC = ['# Plan', '', 'SQLite será o storage.', '', 'A API será REST.', ''].join('\n')
 
@@ -45,6 +45,42 @@ test('an edit on disk while the draft holds changes blocks Revisar until Cancela
   await clock.advance(2000)
   expect(host.view()).toMatchObject({ stale: false, hunks: [] })
   expect(host.shown()).toContain('GraphQL')
+})
+
+test('a Desfazer that empties a stale draft keeps its base, Refazer and the thread', async ($, on) => {
+  const clock = mock.clock(on)
+  const host = fakeHost(on, { 'spec.md': SPEC })
+  await $.command.run(OPEN('spec.md'))
+  host.page({ kind: 'open', mode: 'comment', text: 'REST', seg: 2, message: 'Troca por gRPC.' })
+  await clock.advance(2000)
+  const id = host.view()!.threads[0]!.id
+  await $.turn.complete(DONE(id, 'Troquei.', [{ old: 'REST', new: 'gRPC' }]))
+  const round = host.view()!.threads[0]!.messages.find(one => one.round !== undefined)!.round!
+
+  host.files.set('spec.md', SPEC.replace('# Plan', '# Plano'))
+  await clock.advance(2000)
+  expect(host.view()!.stale).toBe(true)
+
+  // The draft is empty again, but the disk is not taken in behind its back.
+  host.page({ kind: 'undoRound', thread: id, round })
+  await clock.advance(2000)
+  expect(host.view()).toMatchObject({ stale: true, hunks: [], canUndo: true, threads: [{ detached: false }] })
+  expect(host.view()!.threads[0]!.messages.find(one => one.round === round)!.undone).toBe(true)
+  expect(host.shown()).not.toContain('Plano')
+  expect(host.shown()).not.toContain('gRPC')
+
+  host.page({ kind: 'redoRound', thread: id, round })
+  await clock.advance(2000)
+  expect(host.shown()).toContain('gRPC')
+
+  host.page({ kind: 'undo' })
+  await clock.advance(2000)
+  expect(host.view()).toMatchObject({ stale: true, hunks: [], canRedo: true })
+
+  host.page({ kind: 'cancel' })
+  await clock.advance(2000)
+  expect(host.view()).toMatchObject({ stale: false, hunks: [] })
+  expect(host.shown()).toContain('# Plano')
 })
 
 test('the file gone from disk is flagged', async ($, on) => {

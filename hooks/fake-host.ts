@@ -57,6 +57,7 @@ export type ViewThread = {
   }[]
   detached: boolean
   collapsed: boolean
+  scope?: 'doc'
   pending: string[]
   line: number
   changes: number

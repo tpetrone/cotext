@@ -44,6 +44,13 @@
   .body pre { background: color-mix(in srgb, var(--fg) 5%, transparent); padding: 10px 12px; border-radius: 6px; }
   section.code .body pre { background: none; padding: 0; border-radius: 0; line-height: 1.5; }
   section.code > .ln { line-height: 1.5; white-space: pre; font-size: 13.5px; padding-top: 0; }
+  /* YAML frontmatter: metadata, shown small and quiet rather than as Markdown. */
+  .body pre.frontmatter {
+    font-size: 12.5px; line-height: 1.5; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere;
+    background: color-mix(in srgb, var(--fg) 3%, transparent); border: 1px solid var(--line); padding: 8px 12px;
+  }
+  .frontmatter .fence { opacity: .5; }
+  .frontmatter .key { color: var(--fg); font-weight: 600; }
   table { border-collapse: collapse; } td, th { border: 1px solid var(--line); padding: 4px 8px; }
   img { max-width: 100%; }
 
@@ -111,8 +118,8 @@
   /* Each round that changed the text can be accepted, taken back and made again. */
   .round { display: flex; justify-content: flex-end; gap: 12px; margin-top: 2px; }
   button.link.accept { color: var(--ins); }
-  .msg.undone { opacity: .55; }
-  .msg.undone .round { opacity: 1; }
+  /* Opacity on .msg would fade Refazer too, making it look disabled: fade all but the buttons. */
+  .msg.undone > :not(.round) { opacity: .55; }
   button.link { border: 0; background: none; color: var(--accent); cursor: pointer; font: inherit; font-size: 12.5px; padding: 0; }
 
   .bar {
@@ -139,6 +146,22 @@
     border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
   }
   .pop .hint { color: var(--muted); font-size: 12px; }
+  /* The dock: the whole document's threads, and a field to start one without selecting anything. */
+  .dock {
+    position: fixed; right: 16px; bottom: 16px; z-index: 15; width: 340px; display: flex; flex-direction: column; gap: 8px;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; box-shadow: var(--shadow); font-size: 14px;
+  }
+  .dock .head { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+  .dock .head .who { font-weight: 600; color: var(--fg); }
+  .dock .head .grow { flex: 1; }
+  .dock .list { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; }
+  .dock .list:empty, .dock.folded .list { display: none; }
+  .dock .list .card { position: static; box-shadow: none; }
+  .dock .modes { margin-top: 0; }
+  .dock textarea {
+    font: inherit; font-size: 13.5px; width: 100%; min-height: 34px; max-height: 30vh; resize: vertical; padding: 5px 8px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
+  }
   .offline { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--del); color: #fff; border-radius: 6px; padding: 4px 10px; font-size: 13px; }
 
   /* Narrow: the balloons follow the text instead of sitting beside it. */
@@ -152,6 +175,8 @@
     section.seg { padding-left: 0; }
     section.seg > .ln { display: none; }
     .bar { left: 16px; right: 16px; flex-wrap: wrap; }
+    .layout { padding-bottom: 240px; }
+    .dock { left: 16px; width: auto; }
   }
 </style>
 </head>
@@ -169,6 +194,14 @@
     <div id="doc"></div>
   </main>
   <aside class="rail" id="rail"></aside>
+</div>
+<div class="dock" id="dock" hidden>
+  <div class="head">
+    <button class="fold" id="dockFold" title="Recolher" aria-expanded="true">▾</button>
+    <span class="who">Documento inteiro</span><span class="grow"></span><span id="dockCount"></span>
+  </div>
+  <div class="list" id="docThreads"></div>
+  <textarea id="docNote" rows="1"></textarea>
 </div>
 <script>
 const TOKEN = new URLSearchParams(location.search).get('t') ?? ''
@@ -227,6 +260,18 @@ function busy() {
 // passes through as text: U+E000/U+E001 then U+E100 + its index.
 const OPEN = '', CLOSE = '', BASE = 0xE100
 
+const FRONTMATTER = /^---[ \t]*\r?\n[\s\S]*\n(---|\.\.\.)[ \t]*\r?$/
+
+// Each line escaped, with the fences dimmed and the keys picked out; the marks stay in the text.
+function frontmatterHtml(text) {
+  const lines = text.split('\n').map((line, i, all) => {
+    const html = escapeHtml(line)
+    if (i === 0 || i === all.length - 1) return `<span class="fence">${html}</span>`
+    return html.replace(/^(\s*(?:-\s+)?)([\w.-]+)(:)/, '$1<span class="key">$2</span>$3')
+  })
+  return `<pre class="frontmatter"><code>${lines.join('\n')}</code></pre>`
+}
+
 function render() {
   shownVersion = view.version ?? 0
   const doc = $('doc')
@@ -234,6 +279,7 @@ function render() {
     $('file').textContent = 'Nenhum arquivo aberto: rode /cotext <arquivo> no Claude Code.'
     doc.replaceChildren()
     $('rail').replaceChildren()
+    renderDock()
     updateBar()
     return
   }
@@ -271,6 +317,7 @@ function render() {
     const body = document.createElement('div')
     body.className = 'body'
     if (isCode || !window.marked) body.innerHTML = `<pre><code>${escapeHtml(text)}</code></pre>`
+    else if (seg.start === 0 && FRONTMATTER.test(seg.text)) body.innerHTML = frontmatterHtml(text)
     else body.innerHTML = marked.parse(text)
     for (const a of body.querySelectorAll('a[href]')) {
       if (!/^(https?:|#|mailto:)/i.test(a.getAttribute('href'))) a.removeAttribute('href')
@@ -336,22 +383,77 @@ function lastAsked(one) {
   return one.messages.findLast(m => m.from === 'user')?.mode ?? one.mode
 }
 
+/** The balloon being typed in, if any: only it keeps its focus across a redraw. */
+function focusedCard() {
+  return document.activeElement?.matches?.('.card textarea') ? document.activeElement.closest('.card').dataset.key : undefined
+}
+
+function refocus(container, key) {
+  const area = key && container.querySelector(`.card[data-key="${CSS.escape(key)}"] textarea`)
+  if (area) { area.focus({ preventScroll: true }); area.setSelectionRange(area.value.length, area.value.length) }
+}
+
 function renderRail() {
   const rail = $('rail')
-  // Only a balloon being typed in keeps its focus across the redraw.
-  const focused = document.activeElement?.matches?.('.card textarea') ? document.activeElement.closest('.card').dataset.key : undefined
+  const focused = focusedCard()
   const cards = []
-  for (const one of view.threads) cards.push({ key: `t:${one.id}`, at: one.at, el: threadCard(one) })
+  for (const one of view.threads.filter(one => one.scope !== 'doc')) cards.push({ key: `t:${one.id}`, at: one.at, el: threadCard(one) })
   // A change no thread made (an Excluir) gets a card of its own, to undo it.
   for (const hunk of view.hunks.filter(h => h.threads.length === 0)) cards.push({ key: `h:${hunk.id}`, at: hunk.at, el: changeCard(hunk) })
   for (const card of cards) card.el.dataset.key = card.key
   rail.replaceChildren(...cards.map(card => card.el))
   // Placed first: a balloon not yet placed sits at the top of the rail, and focusing it there would scroll the page.
   placeCards()
-  if (focused) {
-    const area = rail.querySelector(`.card[data-key="${CSS.escape(focused)}"] textarea`)
-    if (area) { area.focus({ preventScroll: true }); area.setSelectionRange(area.value.length, area.value.length) }
+  refocus(rail, focused)
+  renderDock()
+}
+
+// Whether the dock shows only its field.
+let dockFolded = false
+// The mode of the dock's next message.
+let docMode = 'ask'
+
+/** The whole document's balloons, newest at the bottom, just above the field. */
+function renderDock() {
+  const dock = $('dock')
+  dock.hidden = !view?.file
+  const list = $('docThreads')
+  const focused = focusedCard()
+  const threads = (view?.threads ?? []).filter(one => one.scope === 'doc')
+  list.replaceChildren(...threads.map(one => {
+    const el = threadCard(one)
+    el.dataset.key = `t:${one.id}`
+    return el
+  }))
+  dock.classList.toggle('folded', dockFolded)
+  $('dockFold').textContent = dockFolded ? '▸' : '▾'
+  $('dockFold').title = dockFolded ? 'Expandir' : 'Recolher'
+  $('dockFold').setAttribute('aria-expanded', String(!dockFolded))
+  $('dockCount').textContent = threads.length === 0 ? '' : `${threads.length} ${threads.length === 1 ? 'conversa' : 'conversas'}`
+  refocus(list, focused)
+  if (!dockFolded && threads.length > 0 && !focused) list.scrollTop = list.scrollHeight
+}
+
+// The dock's field is drawn once, so a redraw never drops what is being typed.
+{
+  const area = $('docNote')
+  const picker = modePicker(area, () => docMode, value => { docMode = value }, {
+    ask: 'Perguntar sobre o documento inteiro… (Enter envia)',
+    comment: 'Comentar: o que mudar no documento?',
+  })
+  area.before(picker)
+  area.onkeydown = e => {
+    if (picker.onKey(e)) return
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      const message = area.value.trim()
+      if (message === '') return
+      area.value = ''
+      dockFolded = false
+      act({ kind: 'openDoc', mode: docMode, message }).catch(error => alert(`cotext: ${error.message}`))
+    }
   }
+  $('dockFold').onclick = () => { dockFolded = !dockFolded; renderDock() }
 }
 
 // Collapsed or not as the person last chose, until the mod's view agrees.
@@ -418,15 +520,19 @@ function threadCard(one) {
   fold.textContent = one.collapsed ? '▸' : '▾'
   fold.onclick = e => { e.stopPropagation(); toggleCollapsed(one) }
   head.append(fold)
+  const isDoc = one.scope === 'doc'
   const quote = document.createElement('div')
   quote.className = 'quote'
-  quote.textContent = `“${one.quote}”`
+  // A balloon on the whole document is known by what the person first said.
+  const label = isDoc ? (one.messages[0]?.text ?? '') : one.quote
+  quote.textContent = isDoc ? label : `“${label}”`
+  const where = isDoc ? '' : `<span>L${one.line}</span>`
   if (one.collapsed) {
-    head.insertAdjacentHTML('beforeend', `<span>L${one.line}</span>`)
-    quote.title = one.quote
+    head.insertAdjacentHTML('beforeend', where)
+    quote.title = label
     head.append(quote)
   } else {
-    head.insertAdjacentHTML('beforeend', `<span class="who">${LABEL[one.mode]}</span><span>L${one.line}</span>` +
+    head.insertAdjacentHTML('beforeend', `<span class="who">${LABEL[one.mode]}</span>${where}` +
       (one.detached ? '<span class="warn">(o trecho mudou)</span>' : '') + '<span class="grow"></span>')
   }
   if (one.status !== 'thinking') {
@@ -437,7 +543,7 @@ function threadCard(one) {
   }
   // A collapsed balloon opens where it is; an open one shows its passage.
   card.onclick = () => {
-    if (!one.collapsed) return setActive(one.id, true)
+    if (!one.collapsed) return setActive(one.id, !isDoc)
     setActive(one.id, false)
     toggleCollapsed(one)
   }
@@ -454,7 +560,8 @@ function threadCard(one) {
     card.append(head, tally)
     return card
   }
-  card.append(head, quote)
+  if (!isDoc) card.append(head, quote)
+  else card.append(head)
   for (const m of one.messages) {
     if (m.from === 'user' && m.text === '') continue
     const msg = document.createElement('div')
@@ -468,7 +575,9 @@ function threadCard(one) {
       badge.textContent = MODE[m.mode]
       from.append(badge)
     }
-    msg.append(from, document.createTextNode(m.text))
+    const text = document.createElement('span')
+    text.textContent = m.text
+    msg.append(from, text)
     // A round that changed the text: Desfazer puts it back as it was, Refazer applies it again.
     if (m.round && (m.edits ?? []).some(edit => edit.applied)) {
       if (m.undone) msg.classList.add('undone')
@@ -586,7 +695,7 @@ function changeCard(hunk) {
 function setActive(id, scroll) {
   active = id
   for (const m of document.querySelectorAll('#doc mark.hl')) m.classList.toggle('active', m.dataset.thread === id)
-  for (const c of document.querySelectorAll('#rail .card')) c.classList.toggle('active', c.dataset.key === `t:${id}`)
+  for (const c of document.querySelectorAll('#rail .card, #docThreads .card')) c.classList.toggle('active', c.dataset.key === `t:${id}`)
   if (scroll) document.querySelector(`#doc mark[data-thread="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
 }
 
@@ -640,7 +749,7 @@ $('doc').addEventListener('click', e => {
 })
 
 document.addEventListener('mouseup', e => {
-  if (pop?.contains(e.target) || e.target.closest?.('.bar, aside.rail')) return
+  if (pop?.contains(e.target) || e.target.closest?.('.bar, aside.rail, .dock')) return
   setTimeout(showActions, 0)
 })
 

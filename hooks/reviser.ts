@@ -12,8 +12,9 @@ export const REVISER_TYPE = `cotext:${REVISER}`
 export const REVISER_TOOLS = ['Read', 'Grep', 'Glob'] as const
 
 export const REVISER_PROMPT = [
-  'You help a person review a document in cotext. They selected a passage of their draft and asked',
-  'about it or commented on it. You answer, and on a comment you may propose edits to the draft.',
+  'You help a person review a document in cotext. They selected a passage of their draft, or wrote about',
+  'the document as a whole, and asked or commented. You answer, and on a comment you may propose edits',
+  'to the draft.',
   '',
   'The draft is given to you whole. It is not saved: never write files. You may read other files of',
   'the repository (Read, Grep, Glob) when the answer depends on them.',
@@ -34,7 +35,7 @@ export const REVISER_PROMPT = [
   '{ "thread": "<the thread id your task names>", "reply": "what you answer the person", "edits": [{ "old": "exact text of the draft", "new": "its replacement" }] }',
   '```',
   '`old` is copied character for character from the draft, as short as it can be while still unique,',
-  "and preferably within or next to the selected passage. `new` keeps the draft's formatting (Markdown,",
+  "and preferably within or next to the selected passage, when there is one. `new` keeps the draft's formatting (Markdown,",
   'indentation). An empty `new` deletes `old`. `edits` is `[]` when you change nothing.',
 ].join('\n')
 
@@ -47,8 +48,8 @@ export type Ask = {
   id: string
   file: string
   draft: string
-  /** The passage in the draft: working offsets, and its text there. */
-  passage: { start: number; end: number; text: string; lineStart: number; lineEnd: number; symbol?: string }
+  /** The passage in the draft: working offsets, and its text there; none when the thread is about the whole document. */
+  passage?: { start: number; end: number; text: string; lineStart: number; lineEnd: number; symbol?: string }
   thread: Pick<Thread, 'messages'>
 }
 
@@ -59,13 +60,12 @@ export function lastAsked(thread: Pick<Thread, 'mode' | 'messages'>): Mode {
 
 /** The reviser's task: the draft, the passage, and the thread so far, the last message being the one to answer. */
 export function buildAsk({ id, file, draft, passage, thread }: Ask): string {
-  const lines = passage.lineStart === passage.lineEnd ? `L${passage.lineStart}` : `L${passage.lineStart}-${passage.lineEnd}`
-  const where = passage.symbol === undefined ? lines : `${lines}, in ${passage.symbol}`
   let shown = draft
   let cut = ''
   if (draft.length > MAX_DRAFT) {
-    const from = Math.max(0, passage.start - WINDOW)
-    const to = Math.min(draft.length, passage.end + WINDOW)
+    // With no passage, the start of the draft.
+    const from = Math.max(0, (passage?.start ?? 0) - WINDOW)
+    const to = Math.min(draft.length, (passage?.end ?? 0) + WINDOW)
     shown = draft.slice(from, to)
     cut = ` (an excerpt: characters ${from}-${to} of ${draft.length})`
   }
@@ -77,19 +77,22 @@ export function buildAsk({ id, file, draft, passage, thread }: Ask): string {
     shown,
     '</draft>',
     '',
-    `The selected passage (${where}):`,
-    '<passage>',
-    passage.text,
-    '</passage>',
-    '',
+    ...(passage === undefined ? ["The person's message is about the whole document (no passage selected).", ''] : passageLines(passage)),
     ...(before.length > 0
       ? ['The conversation on it so far:', ...before.reverse().map(one => `${one.from === 'user' ? `Person (${one.mode})` : 'You'}: ${one.text}`), '']
       : []),
     last?.mode === 'comment' ? 'The person comments (comment: act on it):' : 'The person asks (ask: read-only, propose no edits):',
-    last?.text.trim() || (last?.mode === 'comment' ? 'Improve this passage.' : 'Explain this passage.'),
+    last?.text.trim() || `${last?.mode === 'comment' ? 'Improve' : 'Explain'} this ${passage === undefined ? 'document' : 'passage'}.`,
     '',
     `Thread id: ${id}`,
   ].join('\n')
+}
+
+function passageLines(passage: NonNullable<Ask['passage']>): string[] {
+  const lines = passage.lineStart === passage.lineEnd ? `L${passage.lineStart}` : `L${passage.lineStart}-${passage.lineEnd}`
+  const where = passage.symbol === undefined ? lines : `${lines}, in ${passage.symbol}`
+
+  return [`The selected passage (${where}):`, '<passage>', passage.text, '</passage>', '']
 }
 
 export type Proposal = { thread?: string; reply: string; edits: { old: string; new: string }[] }

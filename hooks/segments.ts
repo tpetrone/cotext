@@ -11,6 +11,8 @@ export type Segment = { start: number; end: number; line: number; text: string }
 const MAX_SEGMENT = 9000
 const CODE_LINES = 40
 const FENCE = /^[ \t]*(```|~~~)/
+// YAML frontmatter: a `---` first line up to a `---` or `...` line.
+const FRONTMATTER_END = /^(---|\.\.\.)[ \t]*\r?$/
 
 export function syntaxOf(path: string): Syntax {
   return /\.(md|markdown|mdx)$/i.test(path) ? 'markdown' : 'code'
@@ -19,8 +21,9 @@ export function syntaxOf(path: string): Syntax {
 export function segment(source: string): Segment[] {
   const segments: Segment[] = []
   let start = -1
-  let fence: string | null = null
+  let fence: string | null = hasFrontmatter(source) ? '---' : null
   let offset = 0
+  let first = true
 
   const close = (end: number) => {
     if (start === -1) return
@@ -30,13 +33,16 @@ export function segment(source: string): Segment[] {
 
   for (const line of source.split('\n')) {
     const marker = FENCE.exec(line)?.[1]
-    if (marker !== undefined) {
+    if (fence === '---') {
+      if (!first && FRONTMATTER_END.test(line)) fence = null
+    } else if (marker !== undefined) {
       if (fence === null) fence = marker
       else if (marker === fence) fence = null
     }
     if (line.trim() === '' && fence === null) close(offset - 1)
     else if (start === -1) start = offset
     offset += line.length + 1
+    first = false
   }
   close(source.length)
 
@@ -78,6 +84,11 @@ export function segmentAt(segments: readonly Segment[], offset: number): number 
   })
 
   return found
+}
+
+export function hasFrontmatter(source: string): boolean {
+  const lines = source.split('\n')
+  return /^---[ \t]*\r?$/.test(lines[0]!) && lines.slice(1).some(line => FRONTMATTER_END.test(line))
 }
 
 function capped(source: string, start: number, end: number): Segment[] {

@@ -20,7 +20,7 @@ if (!token) {
 const PAGE = new URL('./index.html', import.meta.url)
 // The page's actions the mod has not taken yet; bounded so a page left open does not grow it.
 const MAX_QUEUED = 200
-const ACTIONS = new Set(['open', 'delete', 'reply', 'archive', 'trash', 'collapse', 'undoRound', 'redoRound', 'acceptRound', 'acceptHunk', 'revert', 'undo', 'redo', 'review', 'cancel'])
+const ACTIONS = new Set(['open', 'openDoc', 'delete', 'reply', 'archive', 'trash', 'collapse', 'undoRound', 'redoRound', 'acceptRound', 'acceptHunk', 'revert', 'undo', 'redo', 'review', 'cancel'])
 
 let view = { version: 0 }
 let queue = []

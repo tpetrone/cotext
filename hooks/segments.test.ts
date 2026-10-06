@@ -27,3 +27,9 @@ test('tells Markdown from code by extension', () => {
   expect(syntaxOf('docs/plan.md')).toBe('markdown')
   expect(syntaxOf('src/sync.ts')).toBe('code')
 })
+
+test('keeps a frontmatter block whole, blank lines and all', () => {
+  const source = ['---', 'title: Plan', '', 'tags: [a]', '---', '', '# Plan'].join('\n')
+  expect(segment(source).map(one => one.text)).toEqual(['---\ntitle: Plan\n\ntags: [a]\n---', '# Plan'])
+  expect(segment('Intro\n\n---\n\nEnd').map(one => one.text)).toEqual(['Intro', '---', 'End'])
+})
