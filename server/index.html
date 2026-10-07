@@ -155,13 +155,34 @@
   .dock .head .who { font-weight: 600; color: var(--fg); }
   .dock .head .grow { flex: 1; }
   .dock .list { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; }
-  .dock .list:empty, .dock.folded .list { display: none; }
+  .dock .list:empty { display: none; }
   .dock .list .card { position: static; box-shadow: none; }
   .dock .modes { margin-top: 0; }
   .dock textarea {
-    font: inherit; font-size: 13.5px; width: 100%; min-height: 34px; max-height: 30vh; resize: vertical; padding: 5px 8px;
+    font: inherit; font-size: 13.5px; width: 100%; min-height: 96px; max-height: 40vh; resize: vertical; padding: 6px 8px;
     border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg);
   }
+  /* The dock opens from a round button in the corner it fills, growing out of it and shrinking back into it. */
+  .dock-fab {
+    position: fixed; right: 16px; bottom: 16px; z-index: 15; width: 48px; height: 48px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: var(--fg); box-shadow: var(--shadow);
+  }
+  .dock-fab:hover { color: var(--accent); }
+  .dock-fab svg { width: 22px; height: 22px; }
+  .dock-fab .badge {
+    position: absolute; top: -4px; right: -4px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+    background: var(--accent); color: #fff; font-size: 11px; line-height: 18px; text-align: center;
+  }
+  .dock-fab .badge:empty { display: none; }
+  .dock { transform-origin: bottom right; }
+  .dock, .dock-fab { transition: opacity .18s ease, transform .18s ease, visibility 0s; }
+  .dock:not(.open), .dock-fab.gone {
+    opacity: 0; transform: scale(.4); visibility: hidden; pointer-events: none;
+    transition: opacity .18s ease, transform .18s ease, visibility 0s .18s;
+  }
+  .dock[hidden], .dock-fab[hidden] { display: none; }
+  @media (prefers-reduced-motion: reduce) { .dock, .dock-fab, .dock:not(.open), .dock-fab.gone { transition: none; } }
   .offline { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--del); color: #fff; border-radius: 6px; padding: 4px 10px; font-size: 13px; }
 
   /* Narrow: the balloons follow the text instead of sitting beside it. */
@@ -197,12 +218,16 @@
 </div>
 <div class="dock" id="dock" hidden>
   <div class="head">
-    <button class="fold" id="dockFold" title="Recolher" aria-expanded="true">▾</button>
     <span class="who">Documento inteiro</span><span class="grow"></span><span id="dockCount"></span>
+    <button class="x" id="dockClose" title="Fechar (Esc)">×</button>
   </div>
   <div class="list" id="docThreads"></div>
-  <textarea id="docNote" rows="1"></textarea>
+  <textarea id="docNote" rows="4"></textarea>
 </div>
+<button class="dock-fab" id="dockOpen" title="Documento inteiro" aria-controls="dock" aria-expanded="false" hidden>
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
+  <span class="badge" id="dockBadge"></span>
+</button>
 <script>
 const TOKEN = new URLSearchParams(location.search).get('t') ?? ''
 const $ = id => document.getElementById(id)
@@ -408,8 +433,8 @@ function renderRail() {
   renderDock()
 }
 
-// Whether the dock shows only its field.
-let dockFolded = false
+// Whether the dock is open, or only its button shows.
+let dockOpen = false
 // The mode of the dock's next message.
 let docMode = 'ask'
 
@@ -417,6 +442,10 @@ let docMode = 'ask'
 function renderDock() {
   const dock = $('dock')
   dock.hidden = !view?.file
+  dock.classList.toggle('open', dockOpen)
+  $('dockOpen').hidden = !view?.file
+  $('dockOpen').classList.toggle('gone', dockOpen)
+  $('dockOpen').setAttribute('aria-expanded', String(dockOpen))
   const list = $('docThreads')
   const focused = focusedCard()
   const threads = (view?.threads ?? []).filter(one => one.scope === 'doc')
@@ -425,13 +454,18 @@ function renderDock() {
     el.dataset.key = `t:${one.id}`
     return el
   }))
-  dock.classList.toggle('folded', dockFolded)
-  $('dockFold').textContent = dockFolded ? '▸' : '▾'
-  $('dockFold').title = dockFolded ? 'Expandir' : 'Recolher'
-  $('dockFold').setAttribute('aria-expanded', String(!dockFolded))
   $('dockCount').textContent = threads.length === 0 ? '' : `${threads.length} ${threads.length === 1 ? 'conversa' : 'conversas'}`
+  $('dockBadge').textContent = threads.length === 0 ? '' : String(threads.length)
   refocus(list, focused)
-  if (!dockFolded && threads.length > 0 && !focused) list.scrollTop = list.scrollHeight
+  if (dockOpen && threads.length > 0 && !focused) list.scrollTop = list.scrollHeight
+}
+
+/** Opens or closes the dock; opening puts the cursor in its field. */
+function setDockOpen(open) {
+  dockOpen = open
+  renderDock()
+  if (open) $('docNote').focus()
+  else $('dockOpen').focus()
 }
 
 // The dock's field is drawn once, so a redraw never drops what is being typed.
@@ -449,11 +483,14 @@ function renderDock() {
       const message = area.value.trim()
       if (message === '') return
       area.value = ''
-      dockFolded = false
       act({ kind: 'openDoc', mode: docMode, message }).catch(error => alert(`cotext: ${error.message}`))
     }
   }
-  $('dockFold').onclick = () => { dockFolded = !dockFolded; renderDock() }
+  area.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); setDockOpen(false) }
+  })
+  $('dockClose').onclick = () => setDockOpen(false)
+  $('dockOpen').onclick = () => setDockOpen(true)
 }
 
 // Collapsed or not as the person last chose, until the mod's view agrees.
@@ -749,7 +786,7 @@ $('doc').addEventListener('click', e => {
 })
 
 document.addEventListener('mouseup', e => {
-  if (pop?.contains(e.target) || e.target.closest?.('.bar, aside.rail, .dock')) return
+  if (pop?.contains(e.target) || e.target.closest?.('.bar, aside.rail, .dock, .dock-fab')) return
   setTimeout(showActions, 0)
 })
 
