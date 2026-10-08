@@ -83,6 +83,23 @@ test('a Desfazer that empties a stale draft keeps its base, Refazer and the thre
   expect(host.shown()).toContain('# Plano')
 })
 
+test("the conversation is told a reviser's answer is the draft's, not for it to apply", async ($, on) => {
+  const clock = mock.clock(on)
+  const host = fakeHost(on, { 'spec.md': SPEC })
+  await $.command.run(OPEN('spec.md'))
+  host.page({ kind: 'open', mode: 'comment', text: 'REST', seg: 2, message: 'Troca por gRPC.' })
+  await clock.advance(2000)
+  const id = host.view()!.threads[0]!.id
+  const done = DONE(id, 'Troquei.', [{ old: 'REST', new: 'gRPC' }])
+  await $.turn.complete(done)
+
+  await $.prompt.submit({ text: `[Subagent hand-back]\n${done.answer}`, wait: false })
+  expect(host.prompts.at(-1)!.context.join('\n')).toMatch(/Do not edit the file/)
+
+  await $.prompt.submit({ text: 'Troca REST por gRPC no spec.md.', wait: false })
+  expect(host.prompts.at(-1)!.context).toEqual([])
+})
+
 test('the file gone from disk is flagged', async ($, on) => {
   const clock = mock.clock(on)
   const host = fakeHost(on, { 'spec.md': SPEC })

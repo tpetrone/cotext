@@ -89,6 +89,8 @@ export type Host = {
   shown: () => string
   /** Queues what the person did on the page, as its server would; the mod takes it on its next look. */
   page: (action: Record<string, unknown>) => void
+  /** The prompts that entered the conversation, with what the model reads beside each. */
+  prompts: { text: string; context: readonly string[] }[]
   /** The commands the mod ran to open the browser. */
   opened: string[][]
   /** How the mod started the server. */
@@ -116,6 +118,7 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
     page: action => {
       queue.push(action)
     },
+    prompts: [],
     opened: [],
     servers: [],
   }
@@ -179,6 +182,11 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
     return { value: undefined }
   })
   on('turn.complete', () => ({ text: '' }))
+  on('prompt.submit', (_, e) => {
+    host.prompts.push({ text: e.text, context: e.context ?? [] })
+
+    return { text: e.text, context: e.context }
+  })
   on('tool.call', (_, e) => {
     if (e.tool !== 'Edit') throw new Error(`no fake for ${e.tool}`)
     const path = relative(e.file_path)

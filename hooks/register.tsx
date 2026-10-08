@@ -70,6 +70,8 @@ let shownView = ''
 let viewVersion = 0
 // The journal as last written, so an unchanged one is not written again.
 let writtenJournal = ''
+// The revisers spawned, whose answers also reach the conversation.
+const revisers = new Set<string>()
 
 const fileAtom = atom({ plugin: 'cotext', key: 'file' } as const, null)
 const baseAtom = atom({ plugin: 'cotext', key: 'base' } as const, '')
@@ -156,6 +158,14 @@ export const register: Register = on => {
     if (ran.deny === undefined && typeof path === 'string' && (await isOpenFile($, path))) await sync($)
 
     return ran
+  })
+
+  // A reviser's answer reaches the conversation too, its edits reading as asked of it: Claude is told they are the draft's.
+  on('prompt.submit', async ($, e, next) => {
+    const file = await read($, fileAtom)
+    if (file === null || !(await isReviserAnswer($, e.text))) return next(e)
+
+    return next({ ...e, context: [...(e.context ?? []), reviserNote(file)] })
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -762,7 +772,10 @@ async function runReviser($: EngineInterface, id: string): Promise<void> {
     })
     if (spawned.deny !== undefined) throw new Error(spawned.deny)
     const agentId = spawned.agentId
-    if (agentId !== undefined) await editThread($, id, one => ({ ...one, agentId }))
+    if (agentId !== undefined) {
+      revisers.add(agentId)
+      await editThread($, id, one => ({ ...one, agentId }))
+    }
   } catch (error) {
     await editThread($, id, one => failed(one, `O revisor não pôde começar: ${error instanceof Error ? error.message : String(error)}`))
   }
@@ -838,6 +851,24 @@ async function takeProposal($: EngineInterface, id: string, proposal: Proposal |
     }
   })
   await pushView($)
+}
+
+/** Whether `text` is a reviser's answer: from a reviser this module spawned, or naming a thread of the review in its json block. */
+async function isReviserAnswer($: EngineInterface, text: string): Promise<boolean> {
+  if ([...revisers].some(one => text.includes(one))) return true
+  const named = [...text.matchAll(/"thread"\s*:\s*"([^"]+)"/g)].map(one => one[1])
+
+  return named.length > 0 && (await read($, threadsAtom)).some(one => named.includes(one.id))
+}
+
+/** What the conversation is told beside a reviser's answer. */
+function reviserNote(file: string): string {
+  return [
+    `cotext: this is the answer of cotext's reviser to a question or comment the person left while reviewing \`${file}\`.`,
+    'cotext has already taken its reply and edits into the review draft, where the person keeps or undoes them;',
+    'the file on disk changes only when they press Revisar. Do not edit the file, apply these edits or act on them',
+    'in any other way: answer at most with a short line that the reviser answered.',
+  ].join(' ')
 }
 
 function failed(thread: Thread, why: string): Thread {
