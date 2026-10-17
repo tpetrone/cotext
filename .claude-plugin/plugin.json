@@ -9,6 +9,12 @@
       "title": "Revisar o plano no cotext",
       "description": "Ao sair do plan mode, o plano abre no cotext para revisão; Aprovar plano leva à aprovação. Desligado, a aprovação aparece direto.",
       "default": true
+    },
+    "planInstructions": {
+      "type": "boolean",
+      "title": "Instruções de plano do cotext",
+      "description": "Em plan mode, diz ao Claude como apresentar o plano, de .claude/cotext/plan-instructions.md no projeto, ~/.claude/cotext/plan-instructions.md ou o padrão do cotext, nessa ordem.",
+      "default": true
     }
   }
 }

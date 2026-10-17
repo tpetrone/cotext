@@ -116,3 +116,53 @@ test('/cotext plan opens the plan, and a file argument still opens that file', a
   expect((await $.command.run(OPEN('plan'))).text).toBe(`Reviewing the plan ${PLAN_PATH}.`)
   expect(host.view()!.file).toBe(PLAN_PATH)
 })
+
+const DEFAULT = 'Comece pelo contexto.'
+
+test("plan mode's full reminder carries the plan instructions, the mod's own by default", async ($, on) => {
+  fakeHost(on, { [PLAN_PATH]: PLAN, 'defaults/plan-instructions.md': `${DEFAULT}\n` })
+  const full = await $.prompt.attachment(PLAN_REMINDER(PLAN_PATH))
+  expect(full.text).toMatch(/^Plan mode is active\./)
+  expect(full.text).toContain('## How to present the plan (cotext, from ')
+  expect(full.text).toContain('defaults/plan-instructions.md)\n\nComece pelo contexto.')
+
+  // Between two full ones, a line.
+  const sparse = await $.prompt.attachment(PLAN_REMINDER(PLAN_PATH, 'sparse'))
+  expect(sparse.text).toMatch(/Present the plan as cotext's instructions/)
+  expect(sparse.text).not.toContain(DEFAULT)
+})
+
+test("the project's plan instructions come before the person's, the person's before the mod's", async ($, on) => {
+  const host = fakeHost(on, {
+    [PLAN_PATH]: PLAN,
+    'defaults/plan-instructions.md': DEFAULT,
+    // The person's, under HOME.
+    'plan-instructions.md': 'Do usuário.',
+    '.claude/cotext/plan-instructions.md': 'Do projeto.',
+  })
+  expect((await $.prompt.attachment(PLAN_REMINDER(PLAN_PATH))).text).toContain('Do projeto.')
+
+  host.files.delete('.claude/cotext/plan-instructions.md')
+  const text = (await $.prompt.attachment(PLAN_REMINDER(PLAN_PATH))).text
+  expect(text).toContain('from /home/me/.claude/cotext/plan-instructions.md)')
+  expect(text).toContain('Do usuário.')
+
+  // An empty file is passed over.
+  host.files.set('plan-instructions.md', '  \n')
+  expect((await $.prompt.attachment(PLAN_REMINDER(PLAN_PATH))).text).toContain(DEFAULT)
+})
+
+test('with the /config row off, plan mode reads as the engine wrote it, and the plan is still known', async ($, on) => {
+  const host = fakeHost(on, { [PLAN_PATH]: PLAN, 'defaults/plan-instructions.md': DEFAULT })
+  host.config.set('cotext.planInstructions', false)
+
+  expect((await $.prompt.attachment(PLAN_REMINDER(PLAN_PATH))).text).toBe(PLAN_REMINDER(PLAN_PATH).text)
+  expect((await $.tool.call({ tool: 'ExitPlanMode' })).deny).toContain(PLAN_PATH)
+})
+
+test("a subagent's plan reminder is left alone", async ($, on) => {
+  fakeHost(on, { [PLAN_PATH]: PLAN, 'defaults/plan-instructions.md': DEFAULT })
+  const own = await $.prompt.attachment({ ...PLAN_REMINDER(PLAN_PATH), agentId: 'agent-1' })
+  expect(own.text).toBe(PLAN_REMINDER(PLAN_PATH).text)
+  expect((await $.tool.call({ tool: 'ExitPlanMode' })).deny).toBeUndefined()
+})

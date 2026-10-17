@@ -86,8 +86,15 @@ const serverAtom = atom({ plugin: 'cotext', key: 'server' } as const, null)
 const planAtom = atom({ plugin: 'cotext', key: 'plan' } as const, null)
 const planReleasedAtom = atom({ plugin: 'cotext', key: 'planReleased' } as const, null)
 
-// The /config row, a field of the manifest's userConfig, that holds ExitPlanMode for a review of the plan.
+// The /config rows, fields of the manifest's userConfig: ExitPlanMode held for a
+// review of the plan, and instructions on how to present it added to plan mode.
 const REVIEW_PLANS = 'reviewPlans'
+const PLAN_INSTRUCTIONS = 'planInstructions'
+// Where the instructions are looked for, first found first: the project's, the person's, the mod's.
+const PLAN_INSTRUCTIONS_FILE = '.claude/cotext/plan-instructions.md'
+const DEFAULT_PLAN_INSTRUCTIONS = 'defaults/plan-instructions.md'
+// What the sparse plan-mode reminder carries of them.
+const SPARSE_INSTRUCTIONS = "Present the plan as cotext's instructions in plan mode say."
 // The reminders that name the session's plan file.
 const PLAN_REMINDERS: readonly string[] = ['plan_mode', 'plan_mode_reentry', 'plan_mode_exit']
 
@@ -175,14 +182,19 @@ export const register: Register = on => {
     return ran
   })
 
-  // The plan-mode reminders name the session's plan file: the one ExitPlanMode is held for.
+  // The plan-mode reminders name the session's plan file, the one ExitPlanMode
+  // is held for, and carry the instructions on how to present it.
   on('prompt.attachment', async ($, e, next) => {
-    if (e.agentId === undefined && PLAN_REMINDERS.includes(e.type)) {
-      const path = (e as { detail?: { planFilePath?: unknown } }).detail?.planFilePath
-      if (typeof path === 'string' && path !== (await read($, planAtom))) await update($, planAtom, () => path)
-    }
+    if (e.agentId !== undefined || !PLAN_REMINDERS.includes(e.type)) return next(e)
+    const detail = (e as { detail?: { planFilePath?: unknown; reminder?: unknown } }).detail
+    const path = detail?.planFilePath
+    if (typeof path === 'string' && path !== (await read($, planAtom))) await update($, planAtom, () => path)
+    if (e.type !== 'plan_mode') return next(e)
+    const instructions = await planInstructions($)
+    if (instructions === undefined) return next(e)
 
-    return next(e)
+    // The full reminder carries them whole; the sparse one between two full ones, a line.
+    return next({ ...e, text: `${e.text}\n\n${detail?.reminder === 'sparse' ? SPARSE_INSTRUCTIONS : fullInstructions(instructions)}` })
   })
 
   // The plan is reviewed in cotext before its approval: ExitPlanMode is refused,
@@ -1217,7 +1229,7 @@ async function cancelReview($: EngineInterface): Promise<void> {
 /** `/cotext plan`: opens the session's plan; `on` and `off` hold ExitPlanMode for it or not. */
 async function planCommand($: EngineInterface, arg: string | undefined): Promise<string> {
   if (arg === 'on' || arg === 'off') {
-    const row = await reviewPlansRow($)
+    const row = await configRow($, REVIEW_PLANS)
     if (row === undefined) return 'cotext: /config has no "Revisar o plano no cotext" row; is the plugin enabled?'
     const { deny } = await $.config.set({ key: row.key, value: arg === 'on' })
     if (deny !== undefined) return `cotext: ${deny}`
@@ -1238,15 +1250,47 @@ async function planCommand($: EngineInterface, arg: string | undefined): Promise
 
 /** Whether the /config row holds ExitPlanMode for a review, read at the call so a change in the menu counts at once. */
 async function reviewsPlans($: EngineInterface): Promise<boolean> {
-  return (await reviewPlansRow($))?.value !== false
+  return (await configRow($, REVIEW_PLANS))?.value !== false
 }
 
-/** The /config row of the manifest's `reviewPlans`, found by its owner: its key's prefix is the host's to name. */
-async function reviewPlansRow($: EngineInterface): Promise<ConfigRow | undefined> {
+/** The /config row of a field of the manifest's userConfig, found by its owner: its key's prefix is the host's to name. */
+async function configRow($: EngineInterface, field: string): Promise<ConfigRow | undefined> {
   return (await $.config.list()).find(
-    row => row.provider.plugin === $.plugin.name && (row.key === REVIEW_PLANS || row.key.endsWith(`.${REVIEW_PLANS}`)),
+    row => row.provider.plugin === $.plugin.name && (row.key === field || row.key.endsWith(`.${field}`)),
   )
 }
+
+/**
+ * The instructions on how to present a plan, and the file they came from: the
+ * project's, the person's, else the mod's own. Undefined when the /config row
+ * is off or none could be read, so plan mode reads as the engine wrote it.
+ */
+async function planInstructions($: EngineInterface): Promise<{ text: string; from: string } | undefined> {
+  try {
+    if ((await configRow($, PLAN_INSTRUCTIONS))?.value === false) return undefined
+    const home = await $.env.get('HOME')
+    const places = [
+      PLAN_INSTRUCTIONS_FILE,
+      ...(home === undefined ? [] : [`${home}/${PLAN_INSTRUCTIONS_FILE}`]),
+      `${$.plugin.root}/${DEFAULT_PLAN_INSTRUCTIONS}`,
+    ]
+    for (const from of places) {
+      if (!(await $.fs.exists(from))) continue
+      const text = (await $.fs.read(from)).trim()
+      if (text !== '') return { text, from }
+    }
+  } catch (error) {
+    $.ui.log(`cotext: plan instructions: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  }
+
+  return undefined
+}
+
+/** What the full plan-mode reminder carries after the engine's words. */
+function fullInstructions(instructions: { text: string; from: string }): string {
+  return [`## How to present the plan (cotext, from ${instructions.from})`, '', instructions.text].join('\n')
+}
+
 
 /**
  * Aprovar plano: the draft's changes are written to the plan, and Claude is

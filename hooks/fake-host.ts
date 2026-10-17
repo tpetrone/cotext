@@ -42,12 +42,12 @@ export const DONE = (thread: string, reply: string, edits: { old: string; new: s
   }) as const
 
 /** The plan-mode reminder of the main loop, naming the session's plan file. */
-export const PLAN_REMINDER = (planFilePath: string) =>
+export const PLAN_REMINDER = (planFilePath: string, reminder: 'full' | 'sparse' = 'full') =>
   ({
     type: 'plan_mode',
     text: `Plan mode is active. Write your plan to ${planFilePath}.`,
     origin: { kind: 'engine' },
-    detail: { reminder: 'full', planFilePath, hasPlan: true },
+    detail: { reminder, planFilePath, hasPlan: true },
   }) as const
 
 export type ViewThread = {
@@ -111,8 +111,16 @@ export type Host = {
   config: Map<string, boolean>
 }
 
-// The engine hands fs hooks absolute paths, resolved against the plugin's folder.
-const relative = (path: string) => path.split('/cotext/').pop()!
+// The engine hands fs hooks absolute paths, resolved against the plugin's folder:
+// what follows its first `/cotext/`, so a project's `.claude/cotext/` keeps its own.
+const relative = (path: string) => {
+  const at = path.indexOf('/cotext/')
+
+  return at === -1 ? path : path.slice(at + '/cotext/'.length)
+}
+
+/** Where the person's own files are, as `HOME` says. */
+export const HOME = '/home/me'
 
 const PORT = 4711
 
@@ -136,7 +144,10 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
     opened: [],
     servers: [],
     approvals: [],
-    config: new Map([['cotext.reviewPlans', true]]),
+    config: new Map([
+      ['cotext.reviewPlans', true],
+      ['cotext.planInstructions', true],
+    ]),
   }
 
   on('fs.exists', (_, e) => ({ value: host.files.has(relative(e.path)) }))
@@ -204,6 +215,7 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
     return { text: e.text, context: e.context }
   })
   on('prompt.attachment', (_, e) => e)
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? HOME : undefined }) as never)
   // The manifest's userConfig fields, as /config draws them.
   on('config.list', () => ({
     value: [...host.config].map(([key, value]) => ({
