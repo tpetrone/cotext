@@ -13,6 +13,8 @@ import {
   displayToBase,
   displayToWorking,
   randomId,
+  touching,
+  wholeLine,
   working,
 } from './draft'
 import {
@@ -34,11 +36,14 @@ import {
   REVISER_TOOLS,
   REVISER_TYPE,
   buildAsk,
+  buildFollowUp,
+  draftMark,
   findEdit,
   lastAsked,
   parseProposal,
 } from './reviser'
 import type { Proposal } from './reviser'
+import { lineage, parentOf, redoChain, undoChain } from './rounds'
 import { chunkLines, segment, syntaxOf } from './segments'
 import type { Segment } from './segments'
 import { enclosingSymbol } from './symbols'
@@ -63,6 +68,8 @@ const EDIT_TOOLS: Readonly<Record<string, string>> = {
 // The module's own: a reload drops them, and session.start starts them again.
 let polling: Timer | undefined
 let serving: Promise<Server | undefined> | undefined
+// Settles when the server process has left, so the next review can take the port.
+let serverGone: Promise<void> = Promise.resolve()
 let hasOpenedBrowser = false
 let draining: Promise<void> = Promise.resolve()
 let posting: Promise<void> = Promise.resolve()
@@ -85,6 +92,7 @@ const missingAtom = atom({ plugin: 'cotext', key: 'missing' } as const, false)
 const serverAtom = atom({ plugin: 'cotext', key: 'server' } as const, null)
 const planAtom = atom({ plugin: 'cotext', key: 'plan' } as const, null)
 const planReleasedAtom = atom({ plugin: 'cotext', key: 'planReleased' } as const, null)
+const planChoiceAtom = atom({ plugin: 'cotext', key: 'planChoice' } as const, null)
 
 // The /config rows, fields of the manifest's userConfig: ExitPlanMode held for a
 // review of the plan, and instructions on how to present it added to plan mode.
@@ -105,6 +113,7 @@ type Selection = { text: string; seg: number; contextBefore?: string; contextAft
 type Action =
   | ({ kind: 'open'; mode: Mode; message?: string } & Selection)
   | ({ kind: 'delete' } & Selection)
+  | { kind: 'edit'; seg: number; was: string; text: string }
   | { kind: 'openDoc'; mode: Mode; message: string }
   | { kind: 'reply'; thread: string; mode: Mode; message: string }
   | { kind: 'archive'; thread: string }
@@ -119,13 +128,14 @@ type Action =
   | { kind: 'redo' }
   | { kind: 'review' }
   | { kind: 'cancel' }
+  | { kind: 'end' }
   | { kind: 'approvePlan' }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'cotext',
-      description: 'Review a file in the browser: question, comment or delete a passage, see the changes, then Revisar',
+      description: 'Review a file in the browser: question, comment, delete or edit a passage, see the changes, then Revisar',
       argumentHint: '<file> | plan [on|off]',
     })
     await $.agent.register({
@@ -134,6 +144,7 @@ export const register: Register = on => {
       prompt: REVISER_PROMPT,
       tools: REVISER_TOOLS,
     })
+    for (const one of await read($, threadsAtom)) if (one.reviser !== undefined) revisers.add(one.reviser)
     if ((await read($, fileAtom)) !== null) {
       startPolling($)
       void startServer($)
@@ -205,8 +216,12 @@ export const register: Register = on => {
     if (plan === null || !(await $.fs.exists(plan))) return next(e)
     if ((await read($, planReleasedAtom)) === plan) {
       await update($, planReleasedAtom, () => null)
+      // The permission request inside next answers the dialog; a call that
+      // asked none still spends the choice, so the next plan is reviewed again.
+      const passed = await next(e)
+      if ((await read($, planChoiceAtom)) !== null) await update($, planChoiceAtom, () => null)
 
-      return next(e)
+      return passed
     }
     // Opening the plan would drop another file's unsaved changes.
     const file = await read($, fileAtom)
@@ -219,6 +234,21 @@ export const register: Register = on => {
     await showPage($)
 
     return { deny: planHeldNote(plan) }
+  })
+
+  // Aprovar plano answers that dialog as "Yes, and use auto mode": the request
+  // fires inside the ExitPlanMode just released, on the main thread only.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    if (e.tool_name !== 'ExitPlanMode' || e.agent_id !== undefined) return next(e)
+    if ((await read($, planChoiceAtom)) !== 'auto') return next(e)
+    await update($, planChoiceAtom, () => null)
+
+    return {
+      decision: {
+        behavior: 'allow',
+        updatedPermissions: [{ type: 'setMode', mode: 'auto', destination: 'session' }],
+      },
+    }
   })
 
   // A reviser's answer reaches the conversation too, its edits reading as asked of it: Claude is told they are the draft's.
@@ -244,7 +274,7 @@ export const register: Register = on => {
     const thread =
       threads.find(one => one.id === proposal?.thread && one.status === 'thinking') ??
       threads.find(one => one.agentId === e.agentId && one.status === 'thinking')
-    if (thread !== undefined) await takeProposal($, thread.id, proposal)
+    if (thread !== undefined) await takeProposal($, thread.id, proposal, e.agentId)
 
     return done
   })
@@ -363,6 +393,10 @@ async function openBrowser($: EngineInterface): Promise<void> {
  */
 function startServer($: EngineInterface): Promise<Server | undefined> {
   serving ??= new Promise<Server | undefined>(resolve => {
+    let markGone = () => undefined
+    serverGone = new Promise<void>(done => {
+      markGone = done
+    })
     void (async () => {
       const kept = await read($, serverAtom)
       const token = kept?.token ?? newToken()
@@ -396,6 +430,7 @@ function startServer($: EngineInterface): Promise<Server | undefined> {
       }
       serving = undefined
       if (!isReady) resolve(undefined)
+      markGone()
     })()
   })
 
@@ -449,6 +484,8 @@ async function handle($: EngineInterface, action: Action): Promise<void> {
       return open($, action)
     case 'delete':
       return deletePassage($, action)
+    case 'edit':
+      return editBlock($, action)
     case 'openDoc':
       return openDoc($, action)
     case 'reply':
@@ -477,6 +514,8 @@ async function handle($: EngineInterface, action: Action): Promise<void> {
       return saveReview($)
     case 'cancel':
       return cancelReview($)
+    case 'end':
+      return endReview($)
     case 'approvePlan':
       return approvePlan($)
   }
@@ -517,7 +556,12 @@ async function postView($: EngineInterface): Promise<void> {
     segments:
       file === null
         ? []
-        : segmentsOf(file, shown.text).map(one => ({ ...one, line: lineAt(lines, displayToWorking(hunks, one.start)) })),
+        : segmentsOf(file, shown.text).map(one => {
+            // The block's text as Revisar would save it: what Editar shows.
+            const start = displayToWorking(hunks, one.start)
+
+            return { ...one, line: lineAt(lines, start), work: work.slice(start, displayToWorking(hunks, one.end)) }
+          }),
     spans: [
       ...shown.spans.map(one => ({ kind: one.kind, start: one.start, end: one.end, id: one.hunk })),
       ...threads
@@ -801,8 +845,9 @@ async function reply($: EngineInterface, id: string, mode: Mode, message: string
 }
 
 /**
- * Spawns a reviser on the thread's passage, or the whole document, as the
- * draft has it now; its `turn.complete` brings the answer.
+ * Answers the thread's last message on its passage, or the whole document, as
+ * the draft has it now: the thread's reviser resumed when it has one, else a
+ * new one spawned. Its `turn.complete` brings the answer.
  */
 async function runReviser($: EngineInterface, id: string): Promise<void> {
   const file = await read($, fileAtom)
@@ -815,7 +860,7 @@ async function runReviser($: EngineInterface, id: string): Promise<void> {
   const lines = lineStarts(draft)
   const lineStart = lineAt(lines, start)
   const symbol = syntaxOf(file) === 'code' ? enclosingSymbol(draft, lineStart) : undefined
-  const prompt = buildAsk({
+  const ask = {
     id,
     file,
     draft,
@@ -832,25 +877,40 @@ async function runReviser($: EngineInterface, id: string): Promise<void> {
           },
         }),
     thread,
-  })
+  }
+  const seen = draftMark(draft)
   await editThread($, id, one => ({ ...one, status: 'thinking' }))
   await pushView($)
+  if (thread.reviser !== undefined && (await resumeReviser($, thread.reviser, buildFollowUp({ ...ask, seen: thread.seen })))) {
+    revisers.add(thread.reviser)
+    await editThread($, id, one => ({ ...one, agentId: thread.reviser, seen }))
+
+    return void (await pushView($))
+  }
   try {
     const spawned = await $.agent.spawn({
       subagentType: REVISER_TYPE,
       description: lastAsked(thread) === 'ask' ? 'cotext: answer a question' : 'cotext: act on a comment',
-      prompt,
+      prompt: buildAsk(ask),
     })
     if (spawned.deny !== undefined) throw new Error(spawned.deny)
     const agentId = spawned.agentId
-    if (agentId !== undefined) {
-      revisers.add(agentId)
-      await editThread($, id, one => ({ ...one, agentId }))
-    }
+    if (agentId !== undefined) revisers.add(agentId)
+    // Without an id here, the answer's turn.complete names the reviser.
+    await editThread($, id, ({ reviser: _, ...one }) => ({ ...one, seen, ...(agentId === undefined ? {} : { agentId, reviser: agentId }) }))
   } catch (error) {
     await editThread($, id, one => failed(one, `O revisor não pôde começar: ${error instanceof Error ? error.message : String(error)}`))
   }
   await pushView($)
+}
+
+/** The next message to a reviser that answered before; false when it can no longer take one. */
+async function resumeReviser($: EngineInterface, agentId: string, text: string): Promise<boolean> {
+  try {
+    return (await $.session.send({ to: { agentId }, text })).isDelivered
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -858,9 +918,10 @@ async function runReviser($: EngineInterface, id: string): Promise<void> {
  * thread and the edits the draft, as one step Desfazer takes back whole. An
  * answer to an ask changes nothing, whatever edits it proposed. The reply
  * keeps every edit proposed and where each applied one landed: the round its
- * balloon can take back and bring again.
+ * balloon can take back and bring again. `agentId`, the loop that answered,
+ * is the reviser the thread's next message resumes.
  */
-async function takeProposal($: EngineInterface, id: string, proposal: Proposal | null): Promise<void> {
+async function takeProposal($: EngineInterface, id: string, proposal: Proposal | null, agentId?: string): Promise<void> {
   if (proposal === null) {
     await editThread($, id, one => failed(one, 'O revisor parou antes de responder.'))
     await pushView($)
@@ -903,11 +964,14 @@ async function takeProposal($: EngineInterface, id: string, proposal: Proposal |
       : ignored > 0
         ? '\n\n(Pergunta é só leitura: as alterações propostas foram ignoradas. Comente para alterar.)'
         : ''
+  if (agentId !== undefined) revisers.add(agentId)
   await editThread($, id, one => {
     const { agentId: _, ...rest } = one
 
     return {
       ...rest,
+      // What it left the draft as is what it reads it as next.
+      ...(agentId === undefined ? {} : { reviser: agentId, seen: draftMark(working(base, hunks)) }),
       status: 'idle',
       messages: [
         ...one.messages,
@@ -942,8 +1006,9 @@ function reviserNote(file: string): string {
   ].join(' ')
 }
 
+/** The thread's last reviser failed: the next message spawns a new one. */
 function failed(thread: Thread, why: string): Thread {
-  const { agentId: _, ...rest } = thread
+  const { agentId: _, reviser: __, seen: ___, ...rest } = thread
 
   const message = { from: 'claude' as const, text: why, at: new Date().toISOString(), mode: lastAsked(thread) }
 
@@ -954,12 +1019,89 @@ async function editThread($: EngineInterface, id: string, fn: (one: Thread) => T
   await update($, threadsAtom, list => list.map(one => (one.id === id ? fn(one) : one)))
 }
 
-/** Excluir: the passage struck through in the draft, at once. */
+/**
+ * Excluir: the passage struck through in the draft, at once, with its whole
+ * line when nothing would stay on it. Over the text of a round of Claude's,
+ * it is a round of its own in that round's thread, under it, which Desfazer
+ * can take back alone; over the file's text alone, a change of its own.
+ */
 async function deletePassage($: EngineInterface, action: Extract<Action, { kind: 'delete' }>): Promise<void> {
   const found = await resolveSelection($, action)
   if (found === undefined || found.work[0] === found.work[1]) return
+  const hunks = await read($, hunksAtom)
+  const work = working(await read($, baseAtom), hunks)
+  const [from, to] = wholeLine(work, found.work[0], found.work[1])
+  await personChange($, 'delete', from, to, '')
+}
+
+/**
+ * Editar: the block's Markdown as the person rewrote it on the page, into the
+ * draft as an Excluir goes in. `was` is the block's text the page showed: a
+ * block that changed meanwhile, a round of Claude's landing, is left alone.
+ */
+async function editBlock($: EngineInterface, action: Extract<Action, { kind: 'edit' }>): Promise<void> {
+  const file = await read($, fileAtom)
+  if (file === null || typeof action.text !== 'string' || typeof action.was !== 'string') return
+  if (await read($, staleAtom)) {
+    return void $.ui.toast(`cotext: ${file} changed on disk since the review began; Cancelar takes the new text.`)
+  }
   const base = await read($, baseAtom)
-  await change($, hunks => applyEdit(base, hunks, found.work[0], found.work[1], ''))
+  const hunks = await read($, hunksAtom)
+  const block = segmentsOf(file, display(base, hunks).text)[action.seg]
+  if (block === undefined) return
+  const start = displayToWorking(hunks, block.start)
+  const now = working(base, hunks).slice(start, displayToWorking(hunks, block.end))
+  if (now !== action.was) return void $.ui.toast('cotext: o bloco mudou enquanto você editava; edite de novo.')
+  if (now === action.text) return
+  // Only what differs is changed, so a round's Desfazer finds the rest as it left it.
+  let head = 0
+  while (head < now.length && head < action.text.length && now[head] === action.text[head]) head++
+  let tail = 0
+  while (tail < now.length - head && tail < action.text.length - head && now.at(-1 - tail) === action.text.at(-1 - tail)) tail++
+  await personChange($, 'edit', start + head, start + now.length - tail, action.text.slice(head, action.text.length - tail))
+}
+
+/**
+ * The person's own change of `[from, to)` of the working text to `text`. Over
+ * the text of a round of Claude's, it is a round of its own in that round's
+ * thread, under it, which Desfazer can take back alone; over the file's text
+ * alone, a change of its own.
+ */
+async function personChange($: EngineInterface, kind: 'delete' | 'edit', from: number, to: number, text: string): Promise<void> {
+  const base = await read($, baseAtom)
+  const hunks = await read($, hunksAtom)
+  const work = working(base, hunks)
+  const parent = parentOf(
+    await read($, threadsAtom),
+    touching(hunks, from, to).flatMap(({ one }) => one.rounds ?? []),
+  )
+  if (parent === undefined) return void (await change($, () => applyEdit(base, hunks, from, to, text)))
+  const round = randomId()
+  const old = work.slice(from, to)
+  const message: Message = {
+    from: 'user',
+    text: excerpt(kind === 'delete' ? old : text, 80),
+    at: new Date().toISOString(),
+    mode: 'comment',
+    kind,
+    round,
+    parent: parent.round,
+    edits: [
+      {
+        old,
+        new: text,
+        applied: true,
+        before: work.slice(Math.max(0, from - EDIT_CONTEXT), from),
+        after: work.slice(to, to + EDIT_CONTEXT),
+      },
+    ],
+    // Taken back until the change below: the Desfazer step it pushes then has it so.
+    undone: true,
+  }
+  await editThread($, parent.thread, one => ({ ...one, messages: [...one.messages, message] }))
+  const marks = [{ thread: parent.thread, round, undone: false }]
+  const done = await change($, () => applyEdit(base, hunks, from, to, text, [parent.thread], randomId, [round]), marks)
+  if (!done) await editThread($, parent.thread, one => ({ ...one, messages: one.messages.filter(m => m.round !== round) }))
 }
 
 /**
@@ -978,15 +1120,20 @@ async function change(
   await update($, pastAtom, past => [...past, step].slice(-MAX_HISTORY))
   await update($, futureAtom, () => [])
   await update($, hunksAtom, () => after)
+  await markRounds($, rounds)
+  await pushView($)
+
+  return true
+}
+
+/** Each round taken back or brought again, as `rounds` says. */
+async function markRounds($: EngineInterface, rounds: readonly { thread: string; round: string; undone: boolean }[]): Promise<void> {
   for (const one of rounds) {
     await editThread($, one.thread, thread => ({
       ...thread,
       messages: thread.messages.map(message => (message.round === one.round ? { ...message, undone: one.undone } : message)),
     }))
   }
-  await pushView($)
-
-  return true
 }
 
 /** The draft as it is now, as Desfazer and Refazer keep it. */
@@ -1036,10 +1183,10 @@ async function redo($: EngineInterface): Promise<void> {
 }
 
 /**
- * Desfazer or Refazer on one round of a thread: its applied edits taken back
- * (each `new` becomes its `old` again, last first) or made again (first
- * first). Each is found by the text around where it landed; when one is no
- * longer there, the text changed since and nothing is done.
+ * Desfazer or Refazer on one round of a thread, as one step: Desfazer takes
+ * its applied Excluir rounds back first, Refazer brings its parent rounds
+ * again first. When one of them can no longer be found, the text changed
+ * since and nothing is done.
  */
 async function stepRound($: EngineInterface, id: string, round: string, way: 'undo' | 'redo'): Promise<void> {
   const thread = (await read($, threadsAtom)).find(one => one.id === id)
@@ -1048,26 +1195,40 @@ async function stepRound($: EngineInterface, id: string, round: string, way: 'un
   if ((message.undone === true) === (way === 'undo')) return
   const base = await read($, baseAtom)
   let hunks = await read($, hunksAtom)
-  const applied = message.edits!.filter(one => one.applied)
-  for (const edit of way === 'undo' ? [...applied].reverse() : applied) {
-    const [from, to] = way === 'undo' ? [edit.new, edit.old] : [edit.old, edit.new]
-    const at = findAgain(working(base, hunks), edit, from, baseToWorking(hunks, thread.start, 'start'))
-    if (at === undefined) {
+  const chain = way === 'undo' ? undoChain(thread.messages, round) : redoChain(thread.messages, round)
+  for (const one of chain) {
+    const next = stepOne(base, hunks, thread, thread.messages.find(m => m.round === one)!, way)
+    if (next === undefined) {
       return void $.ui.toast(
         `cotext: o texto mudou desde essa rodada; não dá para ${way === 'undo' ? 'desfazê-la' : 'refazê-la'}.`,
       )
     }
-    hunks = applyEdit(base, hunks, at.start, at.end, to, [id], randomId, [round])
+    hunks = next
   }
-  const done = await change($, () => hunks, [{ thread: id, round, undone: way === 'undo' }])
-  // The draft already reads as the round would leave it: only its mark moves.
+  const marks = chain.map(one => ({ thread: id, round: one, undone: way === 'undo' }))
+  const done = await change($, () => hunks, marks)
+  // The draft already reads as the rounds would leave it: only their marks move.
   if (!done) {
-    await editThread($, id, one => ({
-      ...one,
-      messages: one.messages.map(m => (m.round === round ? { ...m, undone: way === 'undo' } : m)),
-    }))
+    await markRounds($, marks)
     await pushView($)
   }
+}
+
+/**
+ * One round's applied edits taken back (each `new` becomes its `old` again,
+ * last first) or made again (first first), each found by the text around
+ * where it landed: the hunks then, or undefined when one is no longer there.
+ */
+function stepOne(base: string, hunks: Hunk[], thread: Thread, message: Message, way: 'undo' | 'redo'): Hunk[] | undefined {
+  const applied = (message.edits ?? []).filter(one => one.applied)
+  for (const edit of way === 'undo' ? [...applied].reverse() : applied) {
+    const [from, to] = way === 'undo' ? [edit.new, edit.old] : [edit.old, edit.new]
+    const at = findAgain(working(base, hunks), edit, from, baseToWorking(hunks, thread.start, 'start'))
+    if (at === undefined) return undefined
+    hunks = applyEdit(base, hunks, at.start, at.end, to, [thread.id], randomId, [message.round!])
+  }
+
+  return hunks
 }
 
 /**
@@ -1131,12 +1292,17 @@ async function saveReview($: EngineInterface): Promise<void> {
   return commit($, (await read($, hunksAtom)).map(one => one.id))
 }
 
-/** Aceitar on one round: the changes it made in the draft are written to the file, the rest stay. */
+/**
+ * Aceitar on one round: the changes it made in the draft are written to the
+ * file, the rest stay. An Excluir's round holds only over its parent's text,
+ * so the parent's changes go with it.
+ */
 async function acceptRound($: EngineInterface, id: string, round: string): Promise<void> {
   const thread = (await read($, threadsAtom)).find(one => one.id === id)
   const message = thread?.messages.find(one => one.round === round)
-  if (message === undefined || message.undone === true) return
-  const ids = (await read($, hunksAtom)).filter(one => one.rounds?.includes(round)).map(one => one.id)
+  if (thread === undefined || message === undefined || message.undone === true) return
+  const rounds = lineage(thread.messages, round)
+  const ids = (await read($, hunksAtom)).filter(one => one.rounds?.some(r => rounds.includes(r))).map(one => one.id)
   if (ids.length === 0) return void $.ui.toast('cotext: essa rodada não tem alterações a aceitar.')
 
   return commit($, ids)
@@ -1214,7 +1380,7 @@ async function cancelReview($: EngineInterface): Promise<void> {
   const hunks = await read($, hunksAtom)
   const disk = (await $.fs.exists(file)) ? await $.fs.read(file) : base
   const at = new Date().toISOString()
-  const threads = (await read($, threadsAtom)).map(one => {
+  const threads = (await read($, threadsAtom)).map(({ reviser: _, seen: __, ...one }) => {
     const moved = dropUnsaved(follow(one, base, disk))
     const proposed = hunks.filter(hunk => hunk.threads.includes(one.id)).length
 
@@ -1224,6 +1390,40 @@ async function cancelReview($: EngineInterface): Promise<void> {
   await startOver($, disk, threads)
   await pushView($)
   void $.ui.toast(`cotext: discarded ${count(dropped, 'change')}.`)
+}
+
+/**
+ * Encerrar: closes the pane, forgets the open file and stops the page's server.
+ * The journal stays, so the threads return when the file is opened again.
+ * Unsaved changes are dropped; the page asks before it sends this.
+ */
+async function endReview($: EngineInterface, note = 'cotext: revisão encerrada.'): Promise<void> {
+  polling?.cancel()
+  polling = undefined
+  const server = await read($, serverAtom)
+  try {
+    await $.ui.close({ id: PANE })
+  } catch (error) {
+    $.ui.log(`cotext: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  }
+  await update($, fileAtom, () => null)
+  await startOver($, '', [])
+  await update($, serverAtom, () => null)
+  hasOpenedBrowser = false
+  const gone = serverGone
+  if (server !== null) {
+    try {
+      await $.http.fetch(`http://127.0.0.1:${server.port}/shutdown`, {
+        method: 'POST',
+        headers: { 'x-cotext-token': server.token },
+      })
+    } catch (error) {
+      // The process may have exited as it answered; its loop still ends.
+      $.ui.log(`cotext: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+    }
+    await gone
+  }
+  void $.ui.toast(note)
 }
 
 /** `/cotext plan`: opens the session's plan; `on` and `off` hold ExitPlanMode for it or not. */
@@ -1293,9 +1493,9 @@ function fullInstructions(instructions: { text: string; from: string }): string 
 
 
 /**
- * Aprovar plano: the draft's changes are written to the plan, and Claude is
- * asked to call ExitPlanMode again, which this time goes through to the
- * approval with the plan as reviewed.
+ * Aprovar plano: the draft's changes are written to the plan, the review ends
+ * as Encerrar ends it, and Claude is asked to call ExitPlanMode again. That call goes through, and its approval
+ * dialog is answered as "Yes, and use auto mode".
  */
 async function approvePlan($: EngineInterface): Promise<void> {
   const file = await read($, fileAtom)
@@ -1309,7 +1509,8 @@ async function approvePlan($: EngineInterface): Promise<void> {
     if ((await read($, hunksAtom)).length > 0) return
   }
   await update($, planReleasedAtom, () => file)
-  await pushView($)
+  await update($, planChoiceAtom, () => 'auto')
+  await endReview($, 'cotext: plano aprovado; revisão encerrada.')
   void $.prompt.submit({ text: approvedNote(file) })
 }
 

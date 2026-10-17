@@ -32,13 +32,41 @@ test('Aprovar plano saves the review and lets the next ExitPlanMode through, onc
   await clock.advance(2000)
   expect(host.files.get(PLAN_PATH)).toContain('DuckDB')
   expect(host.prompts.at(-1)!.text).toMatch(/Call ExitPlanMode now/)
+  // The approval ends the review, as Encerrar does.
+  expect(host.closed).toEqual(['cotext'])
+  expect(host.toasts.at(-1)).toBe('cotext: plano aprovado; revisão encerrada.')
 
   const passed = await $.tool.call({ tool: 'ExitPlanMode' })
   expect(passed.deny).toBeUndefined()
   expect(host.approvals).toEqual([PLAN.replace('SQLite', 'DuckDB')])
+  // The release spent the auto-mode choice; the dialog is not answered again.
+  expect((await $.classic.PermissionRequest({ tool_name: 'ExitPlanMode', tool_input: {} })).decision).toBeUndefined()
 
   // Told what to change in the approval, Claude's next plan is reviewed again.
   expect((await $.tool.call({ tool: 'ExitPlanMode' })).deny).toContain(PLAN_PATH)
+})
+
+test('Aprovar plano answers the approval as auto mode, once, on the main thread', async ($, on) => {
+  const clock = mock.clock(on)
+  const host = fakeHost(on, { [PLAN_PATH]: PLAN })
+  await $.prompt.attachment(PLAN_REMINDER(PLAN_PATH))
+  await $.tool.call({ tool: 'ExitPlanMode' })
+
+  const ask = { tool_name: 'ExitPlanMode', tool_input: {} }
+  expect((await $.classic.PermissionRequest(ask)).decision).toBeUndefined()
+
+  host.page({ kind: 'approvePlan' })
+  await clock.advance(2000)
+
+  // A subagent, or another tool, does not spend the choice.
+  expect((await $.classic.PermissionRequest({ ...ask, agent_id: 'agent-1' })).decision).toBeUndefined()
+  expect((await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: {} })).decision).toBeUndefined()
+
+  expect((await $.classic.PermissionRequest(ask)).decision).toEqual({
+    behavior: 'allow',
+    updatedPermissions: [{ type: 'setMode', mode: 'auto', destination: 'session' }],
+  })
+  expect((await $.classic.PermissionRequest(ask)).decision).toBeUndefined()
 })
 
 test('Aprovar plano on a stale draft releases nothing', async ($, on) => {
@@ -55,6 +83,7 @@ test('Aprovar plano on a stale draft releases nothing', async ($, on) => {
   await clock.advance(2000)
   expect(host.toasts.at(-1)).toMatch(/changed on disk since the review began/)
   expect(host.prompts).toEqual([])
+  expect(host.closed).toEqual([])
   expect((await $.tool.call({ tool: 'ExitPlanMode' })).deny).toContain(PLAN_PATH)
 })
 
@@ -99,7 +128,7 @@ test('another file with unsaved changes is kept: ExitPlanMode goes through', asy
 
   expect((await $.tool.call({ tool: 'ExitPlanMode' })).deny).toBeUndefined()
   expect(host.toasts.at(-1)).toMatch(/spec\.md has unsaved changes/)
-  expect(host.view()).toMatchObject({ file: 'spec.md', plan: false, hunks: [{ removed: 'A API será REST.' }] })
+  expect(host.view()).toMatchObject({ file: 'spec.md', plan: false, hunks: [{ removed: 'A API será REST.\n' }] })
 })
 
 test('/cotext plan opens the plan, and a file argument still opens that file', async ($, on) => {

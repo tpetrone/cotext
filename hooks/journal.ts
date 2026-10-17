@@ -15,7 +15,7 @@ export const JOURNAL_DIR = '.review'
 export const ARCHIVE_DIR = `${JOURNAL_DIR}/archive`
 
 /** A thread as the journal keeps it: anchored by text, not by offsets. */
-export type SavedThread = Omit<Thread, 'start' | 'end' | 'agentId'> & {
+export type SavedThread = Omit<Thread, 'start' | 'end' | 'agentId' | 'reviser' | 'seen'> & {
   anchor: Anchor
   /** How many of its proposed changes were in the draft, unsaved, when this was written. */
   pending: number
@@ -35,7 +35,8 @@ export function journalPath(file: string): string {
 
 /** A thread as of now, anchored in `base`, counting its hunks over it. */
 function saveThread(base: string, hunks: readonly Hunk[], one: Thread): SavedThread {
-  const { start, end, agentId: _, ...rest } = one
+  // The reviser is this session's: another session cannot resume it.
+  const { start, end, agentId: _, reviser: __, seen: ___, ...rest } = one
 
   return {
     ...rest,

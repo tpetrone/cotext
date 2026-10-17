@@ -77,7 +77,7 @@ test('Revisar records what it wrote, as text, beside the threads', async ($, on)
   expect(written.accepted).toHaveLength(1)
   expect(written.accepted[0]!.changes).toEqual([
     { removed: 'REST', added: 'gRPC', threads: [comment] },
-    { removed: 'Deploy fica para depois.', added: '', threads: [] },
+    { removed: 'Deploy fica para depois.\n', added: '', threads: [] },
   ])
   expect(written.threads).toMatchObject([{ id: comment, pending: 0, anchor: { selectedText: 'gRPC' } }])
 })

@@ -1,5 +1,5 @@
-// The subagent each question or comment spawns: what it is told, and how its
-// answer becomes a reply in the balloon and edits in the draft.
+// The subagent a thread's first message spawns and its next ones resume: what
+// it is told, and how its answer becomes a reply in the balloon and edits in the draft.
 
 import type { Mode, Thread } from '../types'
 
@@ -37,6 +37,9 @@ export const REVISER_PROMPT = [
   '`old` is copied character for character from the draft, as short as it can be while still unique,',
   "and preferably within or next to the selected passage, when there is one. `new` keeps the draft's formatting (Markdown,",
   'indentation). An empty `new` deletes `old`. `edits` is `[]` when you change nothing.',
+  '',
+  'The person may write again on the same thread: their next message comes to you, with the passage as it',
+  'is then and the draft again only when it changed since you read it. Answer it the same way, json block and all.',
 ].join('\n')
 
 // Past this, the reviser gets the part of the draft around the passage.
@@ -53,13 +56,60 @@ export type Ask = {
   thread: Pick<Thread, 'messages'>
 }
 
-/** The mode of the person's last message: what the reviser answering it may do. */
+/** The mode of the person's last message, an Excluir aside: what the reviser answering it may do. */
 export function lastAsked(thread: Pick<Thread, 'mode' | 'messages'>): Mode {
-  return thread.messages.findLast(one => one.from === 'user')?.mode ?? thread.mode
+  return thread.messages.findLast(one => one.from === 'user' && one.kind === undefined)?.mode ?? thread.mode
 }
 
 /** The reviser's task: the draft, the passage, and the thread so far, the last message being the one to answer. */
 export function buildAsk({ id, file, draft, passage, thread }: Ask): string {
+  const [last, ...before] = [...thread.messages].reverse()
+
+  return [
+    ...draftLines(file, draft, passage),
+    ...(passage === undefined ? ["The person's message is about the whole document (no passage selected).", ''] : passageLines(passage)),
+    ...(before.length > 0
+      ? ['The conversation on it so far:', ...before.reverse().map(said), '']
+      : []),
+    ...askLines(id, last, passage),
+  ].join('\n')
+}
+
+export type FollowUp = Ask & {
+  /** The mark of the draft the reviser read last (`draftMark`); the draft goes again when it differs. */
+  seen?: string
+}
+
+/**
+ * The next message to a reviser resumed on its thread: what happened on the
+ * thread since its last answer, which of its rounds are taken back now, the
+ * passage as it is, the draft only when it changed, and the message to answer.
+ */
+export function buildFollowUp({ id, file, draft, passage, thread, seen }: FollowUp): string {
+  const [last, ...before] = [...thread.messages].reverse()
+  const since = before.slice(0, Math.max(0, before.findIndex(one => one.from === 'claude' && one.kind === undefined))).reverse()
+  const undone = thread.messages.filter(one => one.from === 'claude' && one.round !== undefined && one.undone === true)
+
+  return [
+    ...(draftMark(draft) === seen ? ['The draft has not changed since you last read it.', ''] : draftLines(file, draft, passage, 'now')),
+    ...(passage === undefined ? [] : passageLines(passage, 'now')),
+    ...(since.length > 0 ? ['Since your last answer:', ...since.map(said), ''] : []),
+    ...(undone.length > 0
+      ? ['These answers of yours are taken back now; their edits are not in the draft:', ...undone.map(one => `- «${clip(one.text)}»`), '']
+      : []),
+    ...askLines(id, last, passage),
+  ].join('\n')
+}
+
+/** A short mark of a draft: what a resumed reviser read is told apart from what it is now. */
+export function draftMark(draft: string): string {
+  let hash = 5381
+  for (let i = 0; i < draft.length; i++) hash = ((hash << 5) + hash + draft.charCodeAt(i)) | 0
+
+  return `${draft.length}:${(hash >>> 0).toString(36)}`
+}
+
+function draftLines(file: string, draft: string, passage: Ask['passage'], when?: 'now'): string[] {
   let shown = draft
   let cut = ''
   if (draft.length > MAX_DRAFT) {
@@ -69,30 +119,43 @@ export function buildAsk({ id, file, draft, passage, thread }: Ask): string {
     shown = draft.slice(from, to)
     cut = ` (an excerpt: characters ${from}-${to} of ${draft.length})`
   }
-  const [last, ...before] = [...thread.messages].reverse()
 
+  return [`The draft of \`${file}\`${when === 'now' ? ' as it is now' : ''}${cut}:`, '<draft>', shown, '</draft>', '']
+}
+
+function askLines(id: string, last: Thread['messages'][number] | undefined, passage: Ask['passage']): string[] {
   return [
-    `The draft of \`${file}\`${cut}:`,
-    '<draft>',
-    shown,
-    '</draft>',
-    '',
-    ...(passage === undefined ? ["The person's message is about the whole document (no passage selected).", ''] : passageLines(passage)),
-    ...(before.length > 0
-      ? ['The conversation on it so far:', ...before.reverse().map(one => `${one.from === 'user' ? `Person (${one.mode})` : 'You'}: ${one.text}`), '']
-      : []),
     last?.mode === 'comment' ? 'The person comments (comment: act on it):' : 'The person asks (ask: read-only, propose no edits):',
     last?.text.trim() || `${last?.mode === 'comment' ? 'Improve' : 'Explain'} this ${passage === undefined ? 'document' : 'passage'}.`,
     '',
     `Thread id: ${id}`,
-  ].join('\n')
+  ]
 }
 
-function passageLines(passage: NonNullable<Ask['passage']>): string[] {
+/** One earlier message, as the reviser reads it; an Excluir or Editar is told as such, so its text is not written back. */
+function said(one: Thread['messages'][number]): string {
+  const then = one.undone === true ? ' (then undid it)' : ''
+  if (one.kind === 'delete') return `Person deleted${then}: «${one.text}»`
+  if (one.kind === 'edit') {
+    const edit = one.edits?.[0]
+
+    return `Person edited the text${then}: «${clip(edit?.old ?? '')}» became «${clip(edit?.new ?? '')}»`
+  }
+
+  return `${one.from === 'user' ? `Person (${one.mode})` : 'You'}: ${one.text}`
+}
+
+function clip(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+
+  return flat.length > 200 ? `${flat.slice(0, 199)}…` : flat
+}
+
+function passageLines(passage: NonNullable<Ask['passage']>, when?: 'now'): string[] {
   const lines = passage.lineStart === passage.lineEnd ? `L${passage.lineStart}` : `L${passage.lineStart}-${passage.lineEnd}`
   const where = passage.symbol === undefined ? lines : `${lines}, in ${passage.symbol}`
 
-  return [`The selected passage (${where}):`, '<passage>', passage.text, '</passage>', '']
+  return [`The selected passage${when === 'now' ? ' as it is now' : ''} (${where}):`, '<passage>', passage.text, '</passage>', '']
 }
 
 export type Proposal = { thread?: string; reply: string; edits: { old: string; new: string }[] }

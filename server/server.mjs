@@ -1,7 +1,7 @@
 // The review page's server: serves index.html, hands the page the view the
 // mod last posted, and queues what the person did there for the mod to take.
 // It knows nothing of the draft; the mod does. Started by the mod, it lives
-// as long as the mod's load does.
+// until the mod asks it to stop (Encerrar) or the mod's load ends.
 //
 //   node server.mjs <token> [port]
 //
@@ -20,7 +20,7 @@ if (!token) {
 const PAGE = new URL('./index.html', import.meta.url)
 // The page's actions the mod has not taken yet; bounded so a page left open does not grow it.
 const MAX_QUEUED = 200
-const ACTIONS = new Set(['open', 'openDoc', 'delete', 'reply', 'archive', 'trash', 'collapse', 'undoRound', 'redoRound', 'acceptRound', 'acceptHunk', 'revert', 'undo', 'redo', 'review', 'cancel'])
+const ACTIONS = new Set(['open', 'openDoc', 'delete', 'edit', 'reply', 'archive', 'trash', 'collapse', 'undoRound', 'redoRound', 'acceptRound', 'acceptHunk', 'revert', 'undo', 'redo', 'review', 'cancel', 'end', 'approvePlan'])
 
 let view = { version: 0 }
 let queue = []
@@ -52,6 +52,12 @@ const server = createServer(async (req, res) => {
       if (queue.length > MAX_QUEUED) queue.shift()
       process.stdout.write('{"poke":true}\n')
       return json(res, { ok: true })
+    }
+    // Encerrar: answer, then leave, so the port is free for the next review.
+    if (req.method === 'POST' && url.pathname === '/shutdown') {
+      json(res, { ok: true })
+      server.close(() => process.exit(0))
+      return
     }
     return send(res, 404, 'not found')
   } catch (error) {

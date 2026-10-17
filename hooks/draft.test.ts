@@ -9,6 +9,7 @@ import {
   display,
   displayToBase,
   displayToWorking,
+  wholeLine,
   working,
 } from './draft'
 
@@ -87,4 +88,22 @@ test('offsets map between the base, the display and the working text', () => {
   expect(displayToWorking(hunks, 33)).toBe(29)
   expect(baseToWorking(hunks, 20, 'start')).toBe(16)
   expect(baseToWorking(hunks, 31, 'end')).toBe(32)
+})
+
+test('an Excluir of all a line holds takes the whole line, list marker and all', () => {
+  const cut = (work: string, passage: string) => {
+    const at = work.indexOf(passage)
+    const [from, to] = wholeLine(work, at, at + passage.length)
+
+    return work.slice(0, from) + work.slice(to)
+  }
+  expect(cut('- um\n- dois\n- três\n', 'dois')).toBe('- um\n- três\n')
+  expect(cut('- [x] feito\n- [ ] falta\n', 'feito')).toBe('- [ ] falta\n')
+  expect(cut('1. um\n2) dois\n', 'dois')).toBe('1. um\n')
+  expect(cut('  * fundo\n', 'fundo')).toBe('')
+  // On the last line, the break before it goes.
+  expect(cut('- um\n- dois', 'dois')).toBe('- um')
+  // Something else stays on the line: only the passage goes.
+  expect(cut('- um e dois\n', 'dois')).toBe('- um e \n')
+  expect(cut('# Título\n', 'Título')).toBe('# \n')
 })

@@ -24,10 +24,10 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(host.opened[0]![1]).toMatch(/^http:\/\/localhost:4711\/\?t=\w+$/)
     expect(host.view()!.segments.map(one => one.line)).toEqual([1, 3, 5, 7])
 
-    // Excluir strikes the passage through at once, with no reviser.
+    // Excluir strikes the passage through at once, with no reviser; nothing else is on its line, so the line goes too.
     host.page({ kind: 'delete', text: 'O storage remoto fica para depois.', seg: 3 })
     await clock.advance(2000)
-    expect(host.view()!.hunks).toMatchObject([{ removed: 'O storage remoto fica para depois.', added: '', threads: [] }])
+    expect(host.view()!.hunks).toMatchObject([{ removed: 'O storage remoto fica para depois.\n', added: '', threads: [] }])
     expect(host.view()!.spans).toMatchObject([{ kind: 'del' }])
     expect(host.spawned).toHaveLength(0)
 
@@ -63,7 +63,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await $.turn.complete(DONE(comment, 'Troquei para gRPC.', [{ old: 'A API será REST.', new: 'A API será gRPC.' }]))
     expect(host.view()!.hunks).toMatchObject([
       { removed: 'REST', added: 'gRPC', threads: [comment] },
-      { removed: 'O storage remoto fica para depois.' },
+      { removed: 'O storage remoto fica para depois.\n' },
     ])
     expect(host.shown()).toContain('A API será RESTgRPC.')
     expect(host.view()!.threads[1]).toMatchObject({ changes: 1, messages: [{}, { text: 'Troquei para gRPC.' }] })
@@ -89,7 +89,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     // Revisar writes the draft, tells the conversation, and keeps the balloons.
     await ui.press({ key: 'review' })
-    expect(host.files.get('spec.md')).toBe(SPEC.replace('REST', 'gRPC').replace('O storage remoto fica para depois.', ''))
+    expect(host.files.get('spec.md')).toBe(SPEC.replace('REST', 'gRPC').replace('O storage remoto fica para depois.\n', ''))
     expect(host.toasts.at(-1)).toBe('cotext: saved 2 changes to spec.md.')
     expect(host.view()).toMatchObject({ hunks: [], canUndo: false })
     expect(host.view()!.threads).toHaveLength(2)
@@ -119,8 +119,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     // Each message has its own mode: an ask is read-only, whatever the reviser proposes.
     host.page({ kind: 'reply', thread: id, mode: 'ask', message: 'E se for mobile?' })
     await clock.advance(2000)
-    expect(host.spawned[1]!.prompt).toContain('You: REST porque o cliente é web.')
-    expect(host.spawned[1]!.prompt).toContain('The person asks (ask: read-only, propose no edits):\nE se for mobile?')
+    // The thread's reviser is resumed: it keeps the thread so far itself.
+    expect(host.spawned).toHaveLength(1)
+    expect(host.sent[0]!.text).toContain('The person asks (ask: read-only, propose no edits):\nE se for mobile?')
     expect(host.view()!.threads[0]!.status).toBe('thinking')
     await $.turn.complete(DONE(id, 'Para mobile, gRPC.', [{ old: 'REST', new: 'gRPC' }]))
     expect(host.view()!.hunks).toEqual([])
@@ -130,13 +131,12 @@ for (const surface of ['terminal', 'desktop'] as const) {
     // A comment needs words, on a reply too.
     host.page({ kind: 'reply', thread: id, mode: 'comment', message: '  ' })
     await clock.advance(2000)
-    expect(host.spawned).toHaveLength(2)
+    expect(host.sent).toHaveLength(1)
 
     // A comment on a thread opened as an ask acts on the text.
     host.page({ kind: 'reply', thread: id, mode: 'comment', message: 'Troca por gRPC.' })
     await clock.advance(2000)
-    expect(host.spawned[2]!.prompt).toContain('Person (ask): E se for mobile?')
-    expect(host.spawned[2]!.prompt).toContain('The person comments (comment: act on it):\nTroca por gRPC.')
+    expect(host.sent[1]!.text).toContain('The person comments (comment: act on it):\nTroca por gRPC.')
 
     // An edit whose text is not in the draft is reported back, the rest applied.
     await $.turn.complete(
@@ -182,3 +182,25 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await ui.unmount()
   })
 }
+
+test('Encerrar closes the pane, and /cotext opens the browser again', async ($, on) => {
+  const clock = mock.clock(on)
+  const host = fakeHost(on, { 'spec.md': SPEC })
+
+  await $.command.run(OPEN('spec.md'))
+  expect(host.opened).toHaveLength(1)
+  expect(host.servers).toHaveLength(1)
+
+  host.page({ kind: 'end' })
+  await clock.advance(2000)
+  expect(host.closed).toEqual(['cotext'])
+  expect(host.toasts.at(-1)).toBe('cotext: revisão encerrada.')
+
+  const idle = await $.command.run(OPEN(''))
+  expect(idle.text).toBe('Usage: /cotext <file> | plan [on|off]')
+
+  const reopened = await $.command.run(OPEN('spec.md'))
+  expect(reopened.text).toBe('Reviewing spec.md.')
+  expect(host.opened).toHaveLength(2)
+  expect(host.servers).toHaveLength(2)
+})

@@ -59,6 +59,10 @@ export type Message = {
   undone?: boolean
   /** The round's applied edits are in the file as last saved by Revisar. */
   onDisk?: boolean
+  /** The person's Excluir or Editar over a round's text: a round of its own, under that round. */
+  kind?: 'delete' | 'edit'
+  /** On an Excluir's or Editar's round: the round whose text it changed, which must stay applied while it is. */
+  parent?: string
 }
 
 /**
@@ -78,6 +82,10 @@ export type Thread = {
   status: 'thinking' | 'idle' | 'error'
   /** The reviser running for it, matched by its `turn.complete`. */
   agentId?: string
+  /** The thread's reviser, kept between rounds: the next message resumes it rather than spawning another. */
+  reviser?: string
+  /** A mark of the draft that reviser last read, so a resumed one is sent the draft only when it changed. */
+  seen?: string
   /** Its passage is no longer in the file, after the file changed on disk. */
   detached?: boolean
   /** Its balloon shows only its head. */
@@ -123,6 +131,8 @@ declare module 'claude-code' {
       plan: string | null
       /** The plan Aprovar plano released: the next ExitPlanMode on it goes through, once. */
       planReleased: string | null
+      /** Set with that release: the approval dialog is answered as auto mode, once. */
+      planChoice: 'auto' | null
     }
   }
 }

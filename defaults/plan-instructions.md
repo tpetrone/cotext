@@ -7,6 +7,6 @@ The person reviews this plan in cotext before approving it. cotext splits Markdo
 - When the change touches the domain layer, detail its modeling: entities, value objects, aggregates, invariants.
 - 
 - Keep lists short; split a long one under sub-headings. No tables for what may be commented on row by row.
-- Put assumptions and open questions in their own `## Open questions` section, one per bullet.
+- Put assumptions and open questions in their own `## Open questions` section, one `###` heading per question. Write each in prose, not a bare bullet: the context that raises it, what exactly must be decided, how the answer affects the plan, and the possible paths with the trade-offs of each.
 - End with `## Verification`: the tests to run and what to check by hand.
 - Write in the language of the conversation.

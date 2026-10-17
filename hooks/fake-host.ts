@@ -82,7 +82,7 @@ export type View = {
   stale: boolean
   canUndo: boolean
   canRedo: boolean
-  segments: { start: number; end: number; line: number; text: string }[]
+  segments: { start: number; end: number; line: number; text: string; work: string }[]
   spans: { kind: 'del' | 'ins' | 'thread'; start: number; end: number; id: string }[]
   hunks: { id: string; threads: string[]; removed: string; added: string }[]
   threads: ViewThread[]
@@ -93,6 +93,10 @@ export type Host = {
   toasts: string[]
   /** What the subagents the mod spawned were asked, in order. */
   spawned: { subagentType?: string; prompt: string }[]
+  /** What the mod sent to subagents it resumed, in order. */
+  sent: { to: string; text: string }[]
+  /** Whether a send reaches its subagent; false answers it gone. */
+  delivers: boolean
   /** What the page shows now; undefined before the mod posted one. */
   view: () => View | undefined
   /** The display text the page draws, its blocks joined. */
@@ -105,6 +109,8 @@ export type Host = {
   opened: string[][]
   /** How the mod started the server. */
   servers: string[][]
+  /** Panes the mod closed, by id. */
+  closed: string[]
   /** The plans ExitPlanMode reached its approval with, as the file read then. */
   approvals: string[]
   /** The plugin's /config rows, by key. */
@@ -131,6 +137,8 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
     files: new Map(Object.entries(files)),
     toasts: [],
     spawned: [],
+    sent: [],
+    delivers: true,
     view: () => view,
     shown: () => {
       const segments = view?.segments ?? []
@@ -143,6 +151,7 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
     prompts: [],
     opened: [],
     servers: [],
+    closed: [],
     approvals: [],
     config: new Map([
       ['cotext.reviewPlans', true],
@@ -170,11 +179,14 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
 
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  // The server says where it listens, then stays up for the test's life.
+  // The server says where it listens, then stays up until Encerrar asks it to stop.
+  let releaseServer: (() => void) | undefined
   on('process.spawn', async function* (_, e) {
     host.servers.push([...e.argv])
     yield { stream: 'stdout' as const, text: `{"ready":${PORT}}\n` }
-    await new Promise(() => undefined)
+    await new Promise<void>(resolve => {
+      releaseServer = resolve
+    })
 
     return { value: { code: 0, signal: null } }
   })
@@ -192,6 +204,11 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
       queue = []
       return answer(taken)
     }
+    if (path === '/shutdown') {
+      releaseServer?.()
+      releaseServer = undefined
+      return answer({ ok: true })
+    }
     throw new Error(`no fake for ${e.url}`)
   })
   on('agent.register', (_, e) => ({ value: { agent: `cotext:${e.name}` } }))
@@ -202,7 +219,18 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
 
     return { model: 'test' }
   })
+  on('session.send', (_, e) => {
+    if (!host.delivers) return { isDelivered: false, reason: 'no agent by that id' }
+    host.sent.push({ to: e.to, text: e.text })
+
+    return { isDelivered: true }
+  })
   on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', (_, e) => {
+    host.closed.push(e.id)
+
+    return { value: undefined }
+  })
   on('ui.toast', (_, e) => {
     host.toasts.push(e.text)
 
@@ -232,6 +260,8 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
 
     return { value: e.value }
   })
+  // The approval dialog, left for the plugin to answer; unanswered, it decides nothing.
+  on('classic.PermissionRequest', () => ({}))
   // ExitPlanMode reads the plan from its file, as the approval shows it.
   on('tool.call', { tool: 'ExitPlanMode' }, () => {
     const [path, plan] = [...host.files].find(([one]) => one.includes('/plans/')) ?? ['', '']

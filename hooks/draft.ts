@@ -145,14 +145,7 @@ export function applyEdit(
   rounds: readonly string[] = [],
 ): Hunk[] {
   const work = working(base, hunks)
-  let delta = 0
-  const placed = hunks.map(one => {
-    const start = one.start + delta
-    delta += one.text.length - (one.end - one.start)
-
-    return { one, start, end: start + one.text.length }
-  })
-  const touched = placed.filter(({ start, end }) => start <= to && end >= from)
+  const touched = touching(hunks, from, to)
   const wFrom = Math.min(from, ...touched.map(one => one.start))
   const wTo = Math.max(to, ...touched.map(one => one.end))
   const bFrom = workingToBase(hunks, wFrom, 'start')
@@ -169,6 +162,37 @@ export function applyEdit(
   }))
 
   return [...kept, ...made].sort((a, b) => a.start - b.start || a.end - b.end)
+}
+
+/** The hunks `[from, to)` of the working text touches, edges included, and where each lies there. */
+export function touching(hunks: readonly Hunk[], from: number, to: number): { one: Hunk; start: number; end: number }[] {
+  let delta = 0
+  const placed = hunks.map(one => {
+    const start = one.start + delta
+    delta += one.text.length - (one.end - one.start)
+
+    return { one, start, end: start + one.text.length }
+  })
+
+  return placed.filter(({ start, end }) => start <= to && end >= from)
+}
+
+// What may stay of a line before a deleted passage for the line to go too: indentation, a list marker, a checkbox.
+const LINE_HEAD = /^[ \t]*(?:(?:[-*+]|\d+[.)])(?:[ \t]+\[[ xX]\])?[ \t]*)?$/
+
+/**
+ * `[from, to)` of `work`, widened to its whole lines when nothing else would
+ * stay on them but indentation or a list marker, so an Excluir leaves no empty
+ * line or bare `- `. The line's break goes with it; on the last line, the one before.
+ */
+export function wholeLine(work: string, from: number, to: number): [number, number] {
+  const start = work.lastIndexOf('\n', from - 1) + 1
+  const lineEnd = work.indexOf('\n', to)
+  const end = lineEnd === -1 ? work.length : lineEnd
+  if (!LINE_HEAD.test(work.slice(start, from)) || !/^[ \t]*$/.test(work.slice(to, end))) return [from, to]
+  if (lineEnd !== -1) return [start, lineEnd + 1]
+
+  return [Math.max(0, start - 1), end]
 }
 
 // Words, runs of whitespace, and single other characters: what a change is cut into.

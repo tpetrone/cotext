@@ -84,8 +84,11 @@ test('a round whose text changed since cannot be taken back', async ($, on) => {
   const id = host.view()!.threads[0]!.id
   await $.turn.complete(DONE(id, 'Troquei.', [{ old: 'REST', new: 'gRPC' }]))
   const round = host.view()!.threads[0]!.messages[1]!.round!
-  host.page({ kind: 'delete', text: 'gRPC', seg: 2 })
+  // Another thread rewrites what the round wrote.
+  host.page({ kind: 'open', mode: 'comment', text: 'gRPC', seg: 2, message: 'HTTP basta.' })
   await clock.advance(2000)
+  const other = host.view()!.threads[1]!.id
+  await $.turn.complete(DONE(other, 'Troquei.', [{ old: 'gRPC', new: 'HTTP' }]))
   const before = host.view()!.hunks
 
   host.page({ kind: 'undoRound', thread: id, round })
@@ -207,7 +210,7 @@ test('Aceitar writes one round to the file and leaves the rest in the draft', as
   await clock.advance(2000)
   expect(host.files.get('spec.md')).toBe(SPEC.replace('REST', 'gRPC'))
   expect(host.toasts.at(-1)).toBe('cotext: saved 1 change to spec.md.')
-  expect(host.view()!.hunks).toMatchObject([{ removed: 'Deploy fica para depois.', added: '' }])
+  expect(host.view()!.hunks).toMatchObject([{ removed: 'Deploy fica para depois.\n', added: '' }])
   expect(host.view()!.threads[0]).toMatchObject({ pending: [], changes: 0 })
   expect(host.view()!.threads[0]!.messages[1]).toMatchObject({ onDisk: true })
   expect(parseJournal(host.files.get(JOURNAL)!, JOURNAL).accepted[0]!.changes).toEqual([{ removed: 'REST', added: 'gRPC', threads: [id] }])
@@ -215,12 +218,119 @@ test('Aceitar writes one round to the file and leaves the rest in the draft', as
   // The accepted round can still be taken back: that is a change to the draft again.
   host.page({ kind: 'undoRound', thread: id, round })
   await clock.advance(2000)
-  expect(host.view()!.hunks).toMatchObject([{ removed: 'gRPC', added: 'REST' }, { removed: 'Deploy fica para depois.' }])
+  expect(host.view()!.hunks).toMatchObject([{ removed: 'gRPC', added: 'REST' }, { removed: 'Deploy fica para depois.\n' }])
 
   // A change of its own is accepted alone.
   const deletion = host.view()!.hunks[1]!.id
   host.page({ kind: 'acceptHunk', hunk: deletion })
   await clock.advance(2000)
-  expect(host.files.get('spec.md')).toBe(SPEC.replace('REST', 'gRPC').replace('Deploy fica para depois.', ''))
+  expect(host.files.get('spec.md')).toBe(SPEC.replace('REST', 'gRPC').replace('Deploy fica para depois.\n', ''))
   expect(host.view()!.hunks).toMatchObject([{ removed: 'gRPC', added: 'REST' }])
+})
+
+const LIST = ['# Plan', '', '- SQLite será o storage.', '- A API será REST.', ''].join('\n')
+const REWRITE = 'A API será gRPC, com streaming bidirecional; e terá cache, em memória por cliente.'
+// The round's text as the page shows it, after the struck REST.
+const WROTE = REWRITE.slice('A API será '.length)
+
+/** A comment on the list's REST item, answered by a round that rewrites it. */
+async function listRound($: Parameters<Body>[0], on: Parameters<Body>[1]) {
+  const clock = mock.clock(on)
+  const host = fakeHost(on, { 'spec.md': LIST })
+  await $.command.run(OPEN('spec.md'))
+  host.page({ kind: 'open', mode: 'comment', text: 'A API será REST.', seg: 1, message: 'Detalha.' })
+  await clock.advance(2000)
+  const id = host.view()!.threads[0]!.id
+  await $.turn.complete(DONE(id, 'Detalhei.', [{ old: 'A API será REST.', new: REWRITE }]))
+  const round = host.view()!.threads[0]!.messages[1]!.round!
+  const deletions = () => host.view()!.threads[0]!.messages.filter(one => (one as { kind?: string }).kind === 'delete')
+
+  return { clock, host, id, round, deletions }
+}
+
+test("an Excluir over a round's text is a round under it, taken back alone or with it", async ($, on) => {
+  const { clock, host, id, round, deletions } = await listRound($, on)
+  host.page({ kind: 'delete', text: ', com streaming bidirecional', seg: 1 })
+  await clock.advance(2000)
+  expect(host.shown()).not.toContain('gRPC, com streaming')
+  // In the round's thread, not a change of its own.
+  expect(deletions()).toMatchObject([{ from: 'user', text: ', com streaming bidirecional', parent: round }])
+  expect(host.view()!.hunks.every(one => one.threads.includes(id))).toBe(true)
+  const child = deletions()[0]!.round!
+
+  // The Excluir alone: the round stays.
+  host.page({ kind: 'undoRound', thread: id, round: child })
+  await clock.advance(2000)
+  expect(host.toasts).toEqual([])
+  expect(host.shown()).toContain(WROTE)
+  expect(deletions()[0]!.undone).toBe(true)
+  host.page({ kind: 'redoRound', thread: id, round: child })
+  await clock.advance(2000)
+  expect(host.shown()).not.toContain('gRPC, com streaming')
+
+  // The round takes its Excluir back with it, in one step.
+  host.page({ kind: 'undoRound', thread: id, round })
+  await clock.advance(2000)
+  expect(host.toasts).toEqual([])
+  expect(host.view()!.hunks).toEqual([])
+  expect(host.view()!.threads[0]!.messages.filter(one => one.round !== undefined).map(one => one.undone)).toEqual([true, true])
+
+  // Refazer on the Excluir brings the round first.
+  host.page({ kind: 'redoRound', thread: id, round: child })
+  await clock.advance(2000)
+  expect(host.shown()).toContain('gRPC; e terá cache')
+  expect(host.view()!.threads[0]!.messages.filter(one => one.round !== undefined).map(one => one.undone)).toEqual([false, false])
+
+  // The page's Desfazer takes that whole Refazer back, then the Desfazer before it.
+  host.page({ kind: 'undo' })
+  await clock.advance(2000)
+  expect(host.view()!.hunks).toEqual([])
+  host.page({ kind: 'undo' })
+  await clock.advance(2000)
+  expect(host.shown()).toContain('gRPC; e terá cache')
+
+  // The reviser, resumed, is told of the Excluir, so it does not write the text back.
+  host.page({ kind: 'reply', thread: id, mode: 'ask', message: 'Ficou bom?' })
+  await clock.advance(2000)
+  expect(host.sent.at(-1)!.text).toContain('Since your last answer:\nPerson deleted: «, com streaming bidirecional»')
+  expect(host.sent.at(-1)!.text).toContain('The person asks (ask: read-only')
+})
+
+test("two Excluir over a round's text are siblings, each taken back alone", async ($, on) => {
+  const { clock, host, id, deletions } = await listRound($, on)
+  host.page({ kind: 'delete', text: ', com streaming bidirecional', seg: 1 })
+  host.page({ kind: 'delete', text: ', em memória por cliente', seg: 1 })
+  await clock.advance(2000)
+  expect(host.shown()).toContain('gRPC; e terá cache.')
+  const [first, second] = deletions().map(one => one.round!)
+
+  host.page({ kind: 'undoRound', thread: id, round: first })
+  await clock.advance(2000)
+  expect(host.toasts).toEqual([])
+  expect(host.shown()).toContain('gRPC, com streaming bidirecional; e terá cache.')
+  host.page({ kind: 'undoRound', thread: id, round: second })
+  await clock.advance(2000)
+  expect(host.toasts).toEqual([])
+  expect(host.shown()).toContain(WROTE)
+  expect(deletions().map(one => one.undone)).toEqual([true, true])
+})
+
+test("Aceitar on an Excluir writes it with its round; one over the file's text stays a change of its own", async ($, on) => {
+  const { clock, host, id, round, deletions } = await listRound($, on)
+  // All of a list item: the line goes, marker and all.
+  host.page({ kind: 'delete', text: 'SQLite será o storage.', seg: 1 })
+  await clock.advance(2000)
+  expect(host.view()!.hunks).toMatchObject([{ removed: '- SQLite será o storage.\n', threads: [] }, { threads: [id] }])
+  expect(deletions()).toEqual([])
+
+  host.page({ kind: 'delete', text: ', com streaming bidirecional', seg: 1 })
+  await clock.advance(2000)
+  host.page({ kind: 'acceptRound', thread: id, round: deletions()[0]!.round! })
+  await clock.advance(2000)
+  expect(host.files.get('spec.md')).toBe(LIST.replace('A API será REST.', 'A API será gRPC; e terá cache, em memória por cliente.'))
+  expect(host.view()!.hunks).toMatchObject([{ removed: '- SQLite será o storage.\n' }])
+  expect(host.view()!.threads[0]!.messages.filter(one => one.round !== undefined)).toMatchObject([
+    { round, onDisk: true },
+    { onDisk: true },
+  ])
 })

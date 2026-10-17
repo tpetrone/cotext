@@ -120,6 +120,16 @@
   button.link.accept { color: var(--ins); }
   /* Opacity on .msg would fade Refazer too, making it look disabled: fade all but the buttons. */
   .msg.undone > :not(.round) { opacity: .55; }
+  /* An Excluir over a round's text: a round of its own, under it. */
+  .msg.child { margin-left: 14px; padding-left: 8px; border-left: 2px solid var(--line); }
+  .msg.child del { color: var(--del); }
+  .msg.child ins { color: var(--ins); text-decoration: none; }
+  /* Editar: the block's Markdown in place of the block, until it is sent or Esc. */
+  section.seg .body textarea.edit {
+    font: 13.5px/1.5 ui-monospace, Menlo, monospace; width: 100%; resize: vertical; padding: 8px 10px; display: block;
+    border: 1px solid var(--accent); border-radius: 6px; background: var(--card); color: var(--fg);
+  }
+  section.seg .body .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
   button.link { border: 0; background: none; color: var(--accent); cursor: pointer; font: inherit; font-size: 12.5px; padding: 0; }
 
   .bar {
@@ -184,6 +194,7 @@
   .dock[hidden], .dock-fab[hidden], .btn[hidden] { display: none; }
   @media (prefers-reduced-motion: reduce) { .dock, .dock-fab, .dock:not(.open), .dock-fab.gone { transition: none; } }
   .offline { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--del); color: #fff; border-radius: 6px; padding: 4px 10px; font-size: 13px; }
+  .ended { margin: 48px 24px; color: var(--muted); }
 
   /* Narrow: the balloons follow the text instead of sitting beside it. */
   @media (max-width: 1150px) {
@@ -206,9 +217,10 @@
   <span class="count" id="count"></span>
   <button class="btn" id="undo" title="Desfazer (⌘Z)">↶</button>
   <button class="btn" id="redo" title="Refazer (⇧⌘Z)">↷</button>
-  <button class="btn primary" id="approve-plan" title="Grava as alterações e pede ao Claude a aprovação do plano" hidden>Aprovar plano</button>
+  <button class="btn primary" id="approve-plan" title="Grava as alterações, encerra a revisão e pede ao Claude a aprovação do plano" hidden>Aprovar plano</button>
   <button class="btn primary" id="review" title="Grava as alterações no arquivo">Revisar</button>
   <button class="btn" id="cancel" title="Descarta alterações e conversas">Cancelar</button>
+  <button class="btn" id="end" title="Encerra a revisão e fecha esta página">Encerrar</button>
 </div>
 <div class="layout" id="layout">
   <main>
@@ -235,6 +247,10 @@ const $ = id => document.getElementById(id)
 
 let view = null
 let shownVersion = -1
+// Encerrar has been asked: stop polling, so the server's exit is not "sem conexão".
+let ended = false
+// Aprovar plano has been asked: the review ends with it, so the server's exit ends the page.
+let approving = false
 let pop = null
 let active = null
 // What the person is typing in each balloon, kept across redraws.
@@ -259,27 +275,74 @@ async function call(path, init = {}) {
   return res.json()
 }
 
-const act = action => call('/action', { method: 'POST', body: JSON.stringify(action) }).then(() => setTimeout(poll, 120))
+const act = action => {
+  approving = action.kind === 'approvePlan'
+  return call('/action', { method: 'POST', body: JSON.stringify(action) }).then(() => setTimeout(poll, 120))
+}
 
 async function poll() {
+  if (ended) return
   try {
     view = await call('/state')
     document.querySelector('.offline')?.remove()
     if (view.version !== shownVersion && !busy()) render()
   } catch {
-    if (!document.querySelector('.offline')) {
-      const note = document.createElement('div')
-      note.className = 'offline'
-      note.textContent = 'cotext: sem conexão com o Claude Code'
-      document.body.append(note)
-    }
+    if (approving) return endPage('Plano aprovado. Pode fechar esta aba.')
+    if (ended || document.querySelector('.offline')) return
+    const note = document.createElement('div')
+    note.className = 'offline'
+    note.textContent = 'cotext: sem conexão com o Claude Code'
+    document.body.append(note)
   }
 }
 
-// A redraw would drop the person's selection or the popover being typed in.
+// A redraw would drop the person's selection, the popover being typed in or the block being edited.
 function busy() {
   const selection = getSelection()
-  return pop !== null || (selection !== null && !selection.isCollapsed && $('doc').contains(selection.anchorNode))
+  return pop !== null || editing !== null || (selection !== null && !selection.isCollapsed && $('doc').contains(selection.anchorNode))
+}
+
+// The block being edited, while its Markdown is open in place of it.
+let editing = null
+
+/** Whether block `i` can be edited: Markdown, not the frontmatter, and a draft Revisar could save. */
+function editable(i) {
+  const seg = view?.segments?.[i]
+  return !!seg && view.syntax !== 'code' && !view.stale && !(seg.start === 0 && FRONTMATTER.test(seg.text))
+}
+
+/** Editar: the block's Markdown, as Revisar would save it, in place of the block. */
+function startEdit(i) {
+  if (editing !== null || !editable(i)) return
+  // Closing the popover may redraw the page: the block is looked up after.
+  closePop()
+  getSelection().removeAllRanges()
+  const body = document.querySelector(`#doc section.seg[data-seg="${i}"] .body`)
+  if (!body) return
+  const was = view.segments[i].work
+  const area = document.createElement('textarea')
+  area.className = 'edit'
+  area.value = was
+  area.rows = Math.max(2, was.split('\n').length + 1)
+  area.spellcheck = true
+  const hint = document.createElement('div')
+  hint.className = 'hint'
+  hint.textContent = '⌘Enter ou clicar fora grava no rascunho · Esc descarta'
+  editing = { seg: i, was }
+  const finish = keep => {
+    if (editing === null) return
+    editing = null
+    const text = area.value
+    render()
+    if (keep && text !== was) act({ kind: 'edit', seg: i, was, text }).catch(error => alert(`cotext: ${error.message}`))
+  }
+  area.onkeydown = e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false) }
+    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); finish(true) }
+  }
+  area.onblur = () => finish(true)
+  body.replaceChildren(area, hint)
+  area.focus({ preventScroll: true })
 }
 
 // Start and end marks for each span, as private-use characters the renderer
@@ -404,9 +467,9 @@ function paintMarks(root, spans, fresh) {
 const LABEL = { ask: 'Pergunta', comment: 'Comentário' }
 const MODE = { ask: 'pergunta · só lê', comment: 'comentário · altera' }
 
-/** The mode of the person's last message on the thread. */
+/** The mode of the person's last message on the thread, an Excluir aside. */
 function lastAsked(one) {
-  return one.messages.findLast(m => m.from === 'user')?.mode ?? one.mode
+  return one.messages.findLast(m => m.from === 'user' && !m.kind)?.mode ?? one.mode
 }
 
 /** The balloon being typed in, if any: only it keeps its focus across a redraw. */
@@ -600,46 +663,14 @@ function threadCard(one) {
   }
   if (!isDoc) card.append(head, quote)
   else card.append(head)
-  for (const m of one.messages) {
-    if (m.from === 'user' && m.text === '') continue
-    const msg = document.createElement('div')
-    msg.className = `msg ${m.from}` + (one.status === 'error' && m === one.messages.at(-1) ? ' error' : '')
-    const from = document.createElement('span')
-    from.className = 'from'
-    from.textContent = m.from === 'user' ? 'Você' : 'Claude'
-    if (m.from === 'user') {
-      const badge = document.createElement('span')
-      badge.className = `mode ${m.mode}`
-      badge.textContent = MODE[m.mode]
-      from.append(badge)
-    }
-    const text = document.createElement('span')
-    text.textContent = m.text
-    msg.append(from, text)
-    // A round that changed the text: Desfazer puts it back as it was, Refazer applies it again.
-    if (m.round && (m.edits ?? []).some(edit => edit.applied)) {
-      if (m.undone) msg.classList.add('undone')
-      const row = document.createElement('div')
-      row.className = 'round'
-      // Aceitar writes this round's changes to the file now; the rest of the draft waits for Revisar.
-      if (!m.undone && (one.pending ?? []).includes(m.round)) {
-        const ok = document.createElement('button')
-        ok.className = 'link accept'
-        ok.textContent = '✓ Aceitar'
-        ok.title = 'Gravar no arquivo só as alterações desta resposta'
-        ok.onclick = e => { e.stopPropagation(); act({ kind: 'acceptRound', thread: one.id, round: m.round }) }
-        row.append(ok)
-      }
-      const b = document.createElement('button')
-      b.className = 'link'
-      b.textContent = m.undone ? '↷ Refazer' : '↶ Desfazer'
-      b.title = m.undone ? 'Aplicar esta edição de novo' : 'Voltar o texto ao que era antes desta resposta'
-      b.onclick = e => { e.stopPropagation(); act({ kind: m.undone ? 'redoRound' : 'undoRound', thread: one.id, round: m.round }) }
-      row.append(b)
-      msg.append(row)
-    }
-    card.append(msg)
+  // An Excluir over a round's text shows right under that round, not where it falls in time.
+  const isChild = m => !!m.kind && one.messages.some(p => p.round === m.parent)
+  const show = m => {
+    if (m.from === 'user' && m.text === '') return
+    card.append(messageEl(one, m))
+    if (m.round) for (const child of one.messages.filter(c => c.parent === m.round && isChild(c))) show(child)
   }
+  for (const m of one.messages) if (!isChild(m)) show(m)
   if (one.status === 'thinking') {
     const t = document.createElement('div')
     t.className = 'thinking'
@@ -673,6 +704,83 @@ function threadCard(one) {
     card.append(picker, area)
   }
   return card
+}
+
+/** One message of a thread's balloon, with Aceitar, Desfazer and Refazer when it is a round that changed the text. */
+function messageEl(one, m) {
+  const msg = document.createElement('div')
+  msg.className = `msg ${m.from}` + (m.kind ? ' child' : '') + (one.status === 'error' && m === one.messages.at(-1) ? ' error' : '')
+  const from = document.createElement('span')
+  from.className = 'from'
+  from.textContent = m.from === 'user' ? 'Você' : 'Claude'
+  const text = document.createElement('span')
+  if (m.kind === 'delete') {
+    from.textContent = 'Você · Exclusão'
+    const del = document.createElement('del')
+    del.textContent = `«${m.text}»`
+    text.append(del)
+  } else if (m.kind === 'edit') {
+    from.textContent = 'Você · Edição'
+    const cut = s => (s.length > 120 ? s.slice(0, 119) + '…' : s)
+    const edit = m.edits?.[0] ?? { old: '', new: m.text }
+    if (edit.old) { const del = document.createElement('del'); del.textContent = cut(edit.old); text.append(del, ' ') }
+    if (edit.new) { const ins = document.createElement('ins'); ins.textContent = cut(edit.new); text.append(ins) }
+  } else {
+    if (m.from === 'user') {
+      const badge = document.createElement('span')
+      badge.className = `mode ${m.mode}`
+      badge.textContent = MODE[m.mode]
+      from.append(badge)
+    }
+    text.textContent = m.text
+  }
+  msg.append(from, text)
+  // A round that changed the text: Desfazer puts it back as it was, Refazer applies it again.
+  if (m.round && (m.edits ?? []).some(edit => edit.applied)) {
+    if (m.undone) msg.classList.add('undone')
+    const row = document.createElement('div')
+    row.className = 'round'
+    // Aceitar writes this round's changes to the file now; the rest of the draft waits for Revisar.
+    if (!m.undone && (one.pending ?? []).includes(m.round)) {
+      const ok = document.createElement('button')
+      ok.className = 'link accept'
+      ok.textContent = '✓ Aceitar'
+      ok.title = m.kind
+        ? `Gravar no arquivo esta ${m.kind === 'delete' ? 'exclusão' : 'edição'}, com a resposta do Claude em que ela está`
+        : 'Gravar no arquivo só as alterações desta resposta'
+      ok.onclick = e => { e.stopPropagation(); act({ kind: 'acceptRound', thread: one.id, round: m.round }) }
+      row.append(ok)
+    }
+    const b = document.createElement('button')
+    b.className = 'link'
+    b.textContent = m.undone ? '↷ Refazer' : '↶ Desfazer'
+    b.title = m.undone ? undoneTitle(one, m) : doneTitle(one, m)
+    b.onclick = e => { e.stopPropagation(); act({ kind: m.undone ? 'redoRound' : 'undoRound', thread: one.id, round: m.round }) }
+    row.append(b)
+    msg.append(row)
+  }
+  return msg
+}
+
+/** Desfazer's tooltip: the person's exclusions and edits still applied under the round go back with it. */
+function doneTitle(one, m) {
+  if (m.kind === 'delete') return 'Trazer de volta o texto excluído'
+  if (m.kind === 'edit') return 'Voltar o texto ao que era antes da sua edição'
+  const under = one.messages.filter(c => c.parent === m.round && !c.undone)
+  const base = 'Voltar o texto ao que era antes desta resposta'
+  if (under.length === 0) return base
+  const what = under.every(c => c.kind === 'delete')
+    ? (under.length === 1 ? 'a exclusão feita nela' : `as ${under.length} exclusões feitas nela`)
+    : (under.length === 1 ? 'a alteração sua feita nela' : `as ${under.length} alterações suas feitas nela`)
+  return `${base}, desfazendo antes ${what}`
+}
+
+/** Refazer's tooltip: an exclusion or edit brings its round back first, when it was taken back. */
+function undoneTitle(one, m) {
+  if (!m.kind) return 'Aplicar esta edição de novo'
+  const again = m.kind === 'delete' ? 'Excluir de novo' : 'Aplicar sua edição de novo'
+  const parent = one.messages.find(p => p.round === m.parent)
+  return parent?.undone ? `${again}, refazendo antes a resposta do Claude` : again
 }
 
 /**
@@ -761,6 +869,23 @@ $('approve-plan').onclick = () => act({ kind: 'approvePlan' })
 $('cancel').onclick = () => {
   if (confirm('Descartar todas as alterações e conversas desta revisão?')) act({ kind: 'cancel' })
 }
+$('end').onclick = () => {
+  const changes = view?.hunks?.length ?? 0
+  if (changes > 0 && !confirm('Encerrar a revisão? As alterações não salvas serão descartadas.')) return
+  call('/action', { method: 'POST', body: JSON.stringify({ kind: 'end' }) }).then(() => endPage()).catch(error => alert(`cotext: ${error.message}`))
+}
+
+/** The review is over: the server is about to exit, and the tab may not let a script close it. */
+function endPage(text = 'Revisão encerrada. Pode fechar esta aba.') {
+  ended = true
+  clearInterval(watch)
+  document.body.replaceChildren()
+  const note = document.createElement('p')
+  note.className = 'ended'
+  note.textContent = text
+  document.body.append(note)
+  window.close()
+}
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && pop) return closePop()
@@ -792,6 +917,12 @@ $('doc').addEventListener('click', e => {
   card?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
 })
 
+// Two clicks on a block open its Markdown to edit.
+$('doc').addEventListener('dblclick', e => {
+  const section = e.target.closest?.('section.seg')
+  if (section && !e.target.closest('textarea')) startEdit(Number(section.dataset.seg))
+})
+
 document.addEventListener('mouseup', e => {
   if (pop?.contains(e.target) || e.target.closest?.('.bar, aside.rail, .dock, .dock-fab')) return
   setTimeout(showActions, 0)
@@ -810,6 +941,7 @@ function closePop() {
 }
 
 function showActions() {
+  if (editing !== null) return
   const selection = getSelection()
   if (!selection || selection.isCollapsed || !$('doc').contains(selection.anchorNode)) return
   const text = selection.toString()
@@ -841,6 +973,14 @@ function showActions() {
     b.className = 'btn'
     b.textContent = label
     b.onclick = () => (kind === 'delete' ? send({ kind: 'delete', ...target }) : askNote(target, kind))
+    row.append(b)
+  }
+  if (editable(target.seg)) {
+    const b = document.createElement('button')
+    b.className = 'btn'
+    b.textContent = 'Editar'
+    b.title = 'Editar o Markdown deste bloco (ou dois cliques no bloco)'
+    b.onclick = () => startEdit(target.seg)
     row.append(b)
   }
   pop.append(row)
@@ -884,7 +1024,7 @@ async function send(action) {
 }
 
 poll()
-setInterval(poll, 700)
+const watch = setInterval(poll, 700)
 </script>
 </body>
 </html>
