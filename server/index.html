@@ -657,6 +657,8 @@ function threadCard(one) {
     area.rows = 1
     area.value = drafts.get(one.id) ?? ''
     area.oninput = () => drafts.set(one.id, area.value)
+    // Typing here shows the balloon as active, but must not scroll the page to its passage.
+    area.onclick = e => { e.stopPropagation(); setActive(one.id, false) }
     area.onkeydown = e => {
       if (picker.onKey(e)) return
       if (e.key === 'Enter' && !e.shiftKey) {
