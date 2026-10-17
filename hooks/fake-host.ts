@@ -41,6 +41,15 @@ export const DONE = (thread: string, reply: string, edits: { old: string; new: s
     reason: 'answer',
   }) as const
 
+/** The plan-mode reminder of the main loop, naming the session's plan file. */
+export const PLAN_REMINDER = (planFilePath: string) =>
+  ({
+    type: 'plan_mode',
+    text: `Plan mode is active. Write your plan to ${planFilePath}.`,
+    origin: { kind: 'engine' },
+    detail: { reminder: 'full', planFilePath, hasPlan: true },
+  }) as const
+
 export type ViewThread = {
   id: string
   mode: string
@@ -67,6 +76,7 @@ export type ViewThread = {
 export type View = {
   version: number
   file: string | null
+  plan: boolean
   syntax: string
   missing: boolean
   stale: boolean
@@ -95,6 +105,10 @@ export type Host = {
   opened: string[][]
   /** How the mod started the server. */
   servers: string[][]
+  /** The plans ExitPlanMode reached its approval with, as the file read then. */
+  approvals: string[]
+  /** The plugin's /config rows, by key. */
+  config: Map<string, boolean>
 }
 
 // The engine hands fs hooks absolute paths, resolved against the plugin's folder.
@@ -121,6 +135,8 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
     prompts: [],
     opened: [],
     servers: [],
+    approvals: [],
+    config: new Map([['cotext.reviewPlans', true]]),
   }
 
   on('fs.exists', (_, e) => ({ value: host.files.has(relative(e.path)) }))
@@ -186,6 +202,30 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
     host.prompts.push({ text: e.text, context: e.context ?? [] })
 
     return { text: e.text, context: e.context }
+  })
+  on('prompt.attachment', (_, e) => e)
+  // The manifest's userConfig fields, as /config draws them.
+  on('config.list', () => ({
+    value: [...host.config].map(([key, value]) => ({
+      key,
+      label: key,
+      kind: 'boolean' as const,
+      value,
+      provider: { plugin: 'cotext', tier: 'user' },
+      isLocked: false,
+    })),
+  }) as never)
+  on('config.set', (_, e) => {
+    host.config.set(e.key, e.value === true)
+
+    return { value: e.value }
+  })
+  // ExitPlanMode reads the plan from its file, as the approval shows it.
+  on('tool.call', { tool: 'ExitPlanMode' }, () => {
+    const [path, plan] = [...host.files].find(([one]) => one.includes('/plans/')) ?? ['', '']
+    host.approvals.push(plan)
+
+    return { result: { plan, isAgent: false, filePath: path } } as never
   })
   on('tool.call', (_, e) => {
     if (e.tool !== 'Edit') throw new Error(`no fake for ${e.tool}`)

@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { ConfigRow, EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Accepted, Hunk, Message, Mode, RoundEdit, Server, Step, Thread } from '../types'
 import { locate } from './anchor'
@@ -83,6 +83,13 @@ const acceptedAtom = atom({ plugin: 'cotext', key: 'accepted' } as const, [])
 const staleAtom = atom({ plugin: 'cotext', key: 'stale' } as const, false)
 const missingAtom = atom({ plugin: 'cotext', key: 'missing' } as const, false)
 const serverAtom = atom({ plugin: 'cotext', key: 'server' } as const, null)
+const planAtom = atom({ plugin: 'cotext', key: 'plan' } as const, null)
+const planReleasedAtom = atom({ plugin: 'cotext', key: 'planReleased' } as const, null)
+
+// The /config row, a field of the manifest's userConfig, that holds ExitPlanMode for a review of the plan.
+const REVIEW_PLANS = 'reviewPlans'
+// The reminders that name the session's plan file.
+const PLAN_REMINDERS: readonly string[] = ['plan_mode', 'plan_mode_reentry', 'plan_mode_exit']
 
 /** A passage the person selected on the page: its text, the block it began in, and the text around it. */
 type Selection = { text: string; seg: number; contextBefore?: string; contextAfter?: string }
@@ -105,13 +112,14 @@ type Action =
   | { kind: 'redo' }
   | { kind: 'review' }
   | { kind: 'cancel' }
+  | { kind: 'approvePlan' }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'cotext',
       description: 'Review a file in the browser: question, comment or delete a passage, see the changes, then Revisar',
-      argumentHint: '<file>',
+      argumentHint: '<file> | plan [on|off]',
     })
     await $.agent.register({
       name: REVISER,
@@ -131,10 +139,17 @@ export const register: Register = on => {
   on('agent.offer', { agent: 'cotext:reviser' }, () => ({ isOffered: false }))
 
   on('command.run', { command: 'cotext' }, async ($, e) => {
+    // `plan` is read before the path is: a file of that name is `./plan`.
+    const words = e.args.trim().split(/\s+/)
+    if (words[0] === 'plan' && words.length <= 2) return { text: await planCommand($, words[1]) }
     const path = e.args.trim().replace(/^@/, '').replace(/^["']|["']$/g, '').replace(/^\.\//, '')
     if (path === '') {
       const file = await read($, fileAtom)
-      if (file === null) return { text: 'Usage: /cotext <file>' }
+      if (file === null) {
+        if ((await read($, planAtom)) !== null) return { text: await planCommand($, undefined) }
+
+        return { text: 'Usage: /cotext <file> | plan [on|off]' }
+      }
       await showPage($)
 
       return { text: `Reviewing ${file}.` }
@@ -158,6 +173,40 @@ export const register: Register = on => {
     if (ran.deny === undefined && typeof path === 'string' && (await isOpenFile($, path))) await sync($)
 
     return ran
+  })
+
+  // The plan-mode reminders name the session's plan file: the one ExitPlanMode is held for.
+  on('prompt.attachment', async ($, e, next) => {
+    if (e.agentId === undefined && PLAN_REMINDERS.includes(e.type)) {
+      const path = (e as { detail?: { planFilePath?: unknown } }).detail?.planFilePath
+      if (typeof path === 'string' && path !== (await read($, planAtom))) await update($, planAtom, () => path)
+    }
+
+    return next(e)
+  })
+
+  // The plan is reviewed in cotext before its approval: ExitPlanMode is refused,
+  // the page opens on the plan, and Aprovar plano asks Claude to call it again.
+  on('tool.call', { tool: 'ExitPlanMode' }, async ($, e, next) => {
+    if (e.agentId !== undefined || !(await reviewsPlans($))) return next(e)
+    const plan = await read($, planAtom)
+    if (plan === null || !(await $.fs.exists(plan))) return next(e)
+    if ((await read($, planReleasedAtom)) === plan) {
+      await update($, planReleasedAtom, () => null)
+
+      return next(e)
+    }
+    // Opening the plan would drop another file's unsaved changes.
+    const file = await read($, fileAtom)
+    if (file !== null && file !== plan && (await read($, hunksAtom)).length > 0) {
+      void $.ui.toast(`cotext: ${file} has unsaved changes; Revisar or Cancelar it to review the plan here.`)
+
+      return next(e)
+    }
+    if ((await openFile($, plan)) !== undefined) return next(e)
+    await showPage($)
+
+    return { deny: planHeldNote(plan) }
   })
 
   // A reviser's answer reaches the conversation too, its edits reading as asked of it: Claude is told they are the draft's.
@@ -201,11 +250,13 @@ export const register: Register = on => {
     const threads = await read($, threadsAtom)
     const thinking = threads.filter(one => one.status === 'thinking').length
     const width = Math.max(20, e.props.bodyColumns - 8)
+    const isPlan = file === (await read($, planAtom))
 
     return (
       <Box flexDirection="column" rowGap={1}>
         <Box flexDirection="column">
           <Text bold>{file}</Text>
+          {isPlan && <Text dimColor>the session's plan</Text>}
           {server === null ? (
             <Text dimColor>starting the review page…</Text>
           ) : (
@@ -216,7 +267,12 @@ export const register: Register = on => {
         </Box>
 
         <Box flexDirection="row" columnGap={1}>
-          <Button key="review" variant="primary" onPress={() => saveReview($)}>
+          {isPlan && (
+            <Button key="approve-plan" variant="primary" onPress={() => approvePlan($)}>
+              Aprovar plano
+            </Button>
+          )}
+          <Button key="review" variant={isPlan ? undefined : 'primary'} onPress={() => saveReview($)}>
             Revisar
           </Button>
           <Button key="undo" onPress={() => undo($)}>
@@ -409,6 +465,8 @@ async function handle($: EngineInterface, action: Action): Promise<void> {
       return saveReview($)
     case 'cancel':
       return cancelReview($)
+    case 'approvePlan':
+      return approvePlan($)
   }
 }
 
@@ -438,6 +496,7 @@ async function postView($: EngineInterface): Promise<void> {
   const lines = lineStarts(work)
   const view = {
     file,
+    plan: file !== null && file === (await read($, planAtom)),
     syntax: file === null ? 'markdown' : syntaxOf(file),
     missing: await read($, missingAtom),
     stale: await read($, staleAtom),
@@ -1153,6 +1212,77 @@ async function cancelReview($: EngineInterface): Promise<void> {
   await startOver($, disk, threads)
   await pushView($)
   void $.ui.toast(`cotext: discarded ${count(dropped, 'change')}.`)
+}
+
+/** `/cotext plan`: opens the session's plan; `on` and `off` hold ExitPlanMode for it or not. */
+async function planCommand($: EngineInterface, arg: string | undefined): Promise<string> {
+  if (arg === 'on' || arg === 'off') {
+    const row = await reviewPlansRow($)
+    if (row === undefined) return 'cotext: /config has no "Revisar o plano no cotext" row; is the plugin enabled?'
+    const { deny } = await $.config.set({ key: row.key, value: arg === 'on' })
+    if (deny !== undefined) return `cotext: ${deny}`
+
+    return arg === 'on'
+      ? 'cotext: the plan is reviewed here before its approval.'
+      : 'cotext: ExitPlanMode goes straight to its approval.'
+  }
+  if (arg !== undefined) return 'Usage: /cotext plan [on|off]'
+  const plan = await read($, planAtom)
+  if (plan === null) return 'No plan in this session yet.'
+  const opened = await openFile($, plan)
+  if (opened !== undefined) return opened
+  await showPage($)
+
+  return `Reviewing the plan ${plan}.`
+}
+
+/** Whether the /config row holds ExitPlanMode for a review, read at the call so a change in the menu counts at once. */
+async function reviewsPlans($: EngineInterface): Promise<boolean> {
+  return (await reviewPlansRow($))?.value !== false
+}
+
+/** The /config row of the manifest's `reviewPlans`, found by its owner: its key's prefix is the host's to name. */
+async function reviewPlansRow($: EngineInterface): Promise<ConfigRow | undefined> {
+  return (await $.config.list()).find(
+    row => row.provider.plugin === $.plugin.name && (row.key === REVIEW_PLANS || row.key.endsWith(`.${REVIEW_PLANS}`)),
+  )
+}
+
+/**
+ * Aprovar plano: the draft's changes are written to the plan, and Claude is
+ * asked to call ExitPlanMode again, which this time goes through to the
+ * approval with the plan as reviewed.
+ */
+async function approvePlan($: EngineInterface): Promise<void> {
+  const file = await read($, fileAtom)
+  if (file === null || file !== (await read($, planAtom))) return
+  if (await read($, staleAtom)) {
+    return void $.ui.toast(`cotext: ${file} changed on disk since the review began; Cancelar takes the new text.`)
+  }
+  if ((await read($, hunksAtom)).length > 0) {
+    await saveReview($)
+    // Not saved: commit said why.
+    if ((await read($, hunksAtom)).length > 0) return
+  }
+  await update($, planReleasedAtom, () => file)
+  await pushView($)
+  void $.prompt.submit({ text: approvedNote(file) })
+}
+
+/** What Claude reads when ExitPlanMode is held for the review. */
+function planHeldNote(plan: string): string {
+  return [
+    `cotext: the person is reviewing the plan in \`${plan}\` in cotext before approving it.`,
+    'Stop here and wait: do not call ExitPlanMode again, nor edit the plan, until you are asked to.',
+  ].join(' ')
+}
+
+/** What Claude is asked once the plan is approved in cotext. */
+function approvedNote(plan: string): string {
+  return [
+    `cotext: the person reviewed and approved the plan in \`${plan}\`; any changes they made are already in the file.`,
+    'Call ExitPlanMode now to ask for its approval, without changing the plan.',
+  ].join(' ')
 }
 
 /**

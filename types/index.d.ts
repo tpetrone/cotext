@@ -119,6 +119,10 @@ declare module 'claude-code' {
       missing: boolean
       /** The review page's server, kept across reloads so an open tab reconnects. */
       server: Server | null
+      /** The session's plan file, as the last plan-mode reminder named it; null before one. */
+      plan: string | null
+      /** The plan Aprovar plano released: the next ExitPlanMode on it goes through, once. */
+      planReleased: string | null
     }
   }
 }

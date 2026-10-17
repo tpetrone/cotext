@@ -181,7 +181,7 @@
     opacity: 0; transform: scale(.4); visibility: hidden; pointer-events: none;
     transition: opacity .18s ease, transform .18s ease, visibility 0s .18s;
   }
-  .dock[hidden], .dock-fab[hidden] { display: none; }
+  .dock[hidden], .dock-fab[hidden], .btn[hidden] { display: none; }
   @media (prefers-reduced-motion: reduce) { .dock, .dock-fab, .dock:not(.open), .dock-fab.gone { transition: none; } }
   .offline { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); background: var(--del); color: #fff; border-radius: 6px; padding: 4px 10px; font-size: 13px; }
 
@@ -206,6 +206,7 @@
   <span class="count" id="count"></span>
   <button class="btn" id="undo" title="Desfazer (⌘Z)">↶</button>
   <button class="btn" id="redo" title="Refazer (⇧⌘Z)">↷</button>
+  <button class="btn primary" id="approve-plan" title="Grava as alterações e pede ao Claude a aprovação do plano" hidden>Aprovar plano</button>
   <button class="btn primary" id="review" title="Grava as alterações no arquivo">Revisar</button>
   <button class="btn" id="cancel" title="Descarta alterações e conversas">Cancelar</button>
 </div>
@@ -745,12 +746,16 @@ function updateBar() {
   $('undo').disabled = !view?.canUndo
   $('redo').disabled = !view?.canRedo
   $('review').disabled = changes === 0 || !!view?.stale
+  $('review').classList.toggle('primary', !view?.plan)
+  $('approve-plan').hidden = !view?.plan
+  $('approve-plan').disabled = !!view?.stale
   $('cancel').disabled = changes === 0 && (view?.threads ?? []).length === 0
 }
 
 $('undo').onclick = () => act({ kind: 'undo' })
 $('redo').onclick = () => act({ kind: 'redo' })
 $('review').onclick = () => act({ kind: 'review' })
+$('approve-plan').onclick = () => act({ kind: 'approvePlan' })
 $('cancel').onclick = () => {
   if (confirm('Descartar todas as alterações e conversas desta revisão?')) act({ kind: 'cancel' })
 }
