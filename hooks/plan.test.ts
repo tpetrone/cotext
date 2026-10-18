@@ -52,7 +52,7 @@ test('Aprovar plano answers the approval as auto mode, once, on the main thread'
   await $.prompt.attachment(PLAN_REMINDER(PLAN_PATH))
   await $.tool.call({ tool: 'ExitPlanMode' })
 
-  const ask = { tool_name: 'ExitPlanMode', tool_input: {} }
+  const ask = { tool_name: 'ExitPlanMode', tool_input: { plan: PLAN } }
   expect((await $.classic.PermissionRequest(ask)).decision).toBeUndefined()
 
   host.page({ kind: 'approvePlan' })
@@ -62,8 +62,10 @@ test('Aprovar plano answers the approval as auto mode, once, on the main thread'
   expect((await $.classic.PermissionRequest({ ...ask, agent_id: 'agent-1' })).decision).toBeUndefined()
   expect((await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: {} })).decision).toBeUndefined()
 
+  // The engine drops an allow that does not carry the call's own input.
   expect((await $.classic.PermissionRequest(ask)).decision).toEqual({
     behavior: 'allow',
+    updatedInput: ask.tool_input,
     updatedPermissions: [{ type: 'setMode', mode: 'auto', destination: 'session' }],
   })
   expect((await $.classic.PermissionRequest(ask)).decision).toBeUndefined()

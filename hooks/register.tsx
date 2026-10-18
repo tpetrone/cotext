@@ -238,14 +238,18 @@ export const register: Register = on => {
 
   // Aprovar plano answers that dialog as "Yes, and use auto mode": the request
   // fires inside the ExitPlanMode just released, on the main thread only.
+  // An allow without the call's own input is dropped, and the dialog stays.
   on('classic.PermissionRequest', async ($, e, next) => {
     if (e.tool_name !== 'ExitPlanMode' || e.agent_id !== undefined) return next(e)
     if ((await read($, planChoiceAtom)) !== 'auto') return next(e)
+    const input = e.tool_input
+    if (typeof input !== 'object' || input === null || Array.isArray(input)) return next(e)
     await update($, planChoiceAtom, () => null)
 
     return {
       decision: {
         behavior: 'allow',
+        updatedInput: input as Record<string, unknown>,
         updatedPermissions: [{ type: 'setMode', mode: 'auto', destination: 'session' }],
       },
     }
