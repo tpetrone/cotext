@@ -1457,10 +1457,16 @@ async function reviewsPlans($: EngineInterface): Promise<boolean> {
   return (await configRow($, REVIEW_PLANS))?.value !== false
 }
 
-/** The /config row of a field of the manifest's userConfig, found by its owner: its key's prefix is the host's to name. */
+/**
+ * The /config row of a field of the manifest's userConfig, found by its owner:
+ * the host may qualify it with the marketplace (`cotext@skills-dir`), and its
+ * key's prefix is the host's to name.
+ */
 async function configRow($: EngineInterface, field: string): Promise<ConfigRow | undefined> {
+  const owns = (owner: string) => owner === $.plugin.name || owner.startsWith(`${$.plugin.name}@`)
+
   return (await $.config.list()).find(
-    row => row.provider.plugin === $.plugin.name && (row.key === field || row.key.endsWith(`.${field}`)),
+    row => owns(row.provider.plugin) && (row.key === field || row.key.endsWith(`.${field}`)),
   )
 }
 

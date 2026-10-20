@@ -54,9 +54,16 @@ const server = createServer(async (req, res) => {
       return json(res, { ok: true })
     }
     // Encerrar: answer, then leave, so the port is free for the next review.
+    // close() alone waits for the page's keep-alive connection, which its
+    // polling never lets go idle: every connection is dropped once the answer is out.
     if (req.method === 'POST' && url.pathname === '/shutdown') {
-      json(res, { ok: true })
-      server.close(() => process.exit(0))
+      res.on('finish', () => {
+        server.close(() => process.exit(0))
+        // Node 18.2 or newer; before it, the exit waits as it always did.
+        server.closeAllConnections?.()
+      })
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', connection: 'close' })
+      res.end(JSON.stringify({ ok: true }))
       return
     }
     return send(res, 404, 'not found')

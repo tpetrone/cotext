@@ -154,8 +154,8 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
     closed: [],
     approvals: [],
     config: new Map([
-      ['cotext.reviewPlans', true],
-      ['cotext.planInstructions', true],
+      ['cotext@skills-dir.reviewPlans', true],
+      ['cotext@skills-dir.planInstructions', true],
     ]),
   }
 
@@ -251,7 +251,7 @@ export function fakeHost(on: On, files: Record<string, string>): Host {
       label: key,
       kind: 'boolean' as const,
       value,
-      provider: { plugin: 'cotext', tier: 'user' },
+      provider: { plugin: 'cotext@skills-dir', tier: 'user' },
       isLocked: false,
     })),
   }) as never)
