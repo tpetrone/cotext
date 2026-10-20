@@ -98,14 +98,14 @@ test('/cotext plan off sends ExitPlanMode straight to its approval', async ($, o
   expect(host.approvals).toEqual([PLAN])
 
   await $.command.run(OPEN('plan on'))
-  expect(host.config.get('cotext.reviewPlans')).toBe(true)
+  expect(host.config.get('cotext@skills-dir.reviewPlans')).toBe(true)
   expect((await $.tool.call({ tool: 'ExitPlanMode' })).deny).toContain(PLAN_PATH)
 })
 
 test('the /config row turned off in the menu counts at the next ExitPlanMode', async ($, on) => {
   const host = fakeHost(on, { [PLAN_PATH]: PLAN })
   await $.prompt.attachment(PLAN_REMINDER(PLAN_PATH))
-  host.config.set('cotext.reviewPlans', false)
+  host.config.set('cotext@skills-dir.reviewPlans', false)
 
   expect((await $.tool.call({ tool: 'ExitPlanMode' })).deny).toBeUndefined()
   expect(host.approvals).toEqual([PLAN])
@@ -185,7 +185,7 @@ test("the project's plan instructions come before the person's, the person's bef
 
 test('with the /config row off, plan mode reads as the engine wrote it, and the plan is still known', async ($, on) => {
   const host = fakeHost(on, { [PLAN_PATH]: PLAN, 'defaults/plan-instructions.md': DEFAULT })
-  host.config.set('cotext.planInstructions', false)
+  host.config.set('cotext@skills-dir.planInstructions', false)
 
   expect((await $.prompt.attachment(PLAN_REMINDER(PLAN_PATH))).text).toBe(PLAN_REMINDER(PLAN_PATH).text)
   expect((await $.tool.call({ tool: 'ExitPlanMode' })).deny).toContain(PLAN_PATH)
